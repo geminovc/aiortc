@@ -10,11 +10,11 @@ import numpy as np
 import concurrent.futures
 import os
 import datetime
-
+import threading
 import av
 from av import AudioFrame, VideoFrame
 from av.frame import Frame
-
+import functools
 from ..mediastreams import AUDIO_PTIME, MediaStreamError, MediaStreamTrack, KeypointsFrame
 
 from first_order_model.fom_wrapper import FirstOrderModel
@@ -24,7 +24,7 @@ time_before_instantiation = time.perf_counter()
 config_path = os.environ.get('CONFIG_PATH')
 checkpoint = os.environ.get('CHECKPOINT_PATH', 'None')
 model = FirstOrderModel(config_path, checkpoint)
-for i in range(100):
+for i in range(10):
     zero_array = np.random.randint(0, 255, model.get_shape(), dtype=np.uint8)
     zero_kps, src_index = model.extract_keypoints(zero_array)
     model.update_source(src_index, zero_array, zero_kps)
@@ -627,8 +627,30 @@ class MediaRecorder:
         if self.__recv_times_file is not None:
             self.__recv_times_file.close()
 
+    def save_av_frame(self, predicted_target, context, frame_index):
+            print("In the thread")
+            try:
+                predicted_frame = av.VideoFrame.from_ndarray(predicted_target)
+                predicted_frame = predicted_frame.reformat(format='yuv420p')
+                #predicted_frame.pts = received_keypoints['pts']
+
+                if self.__save_dir is not None:
+                    predicted_array = np.array(predicted_target)
+                    np.save(os.path.join(self.__save_dir,
+                     'receiver_frame_%05d.npy' % frame_index), predicted_array)
+
+                for packet in context.stream.encode(predicted_frame):
+                    self.__container.mux(packet)
+            except Exception as e:
+                print(e)
+            print("end of thread")
+
+            return True
+    
     async def __run_track(self, track, context):
+        
         loop = asyncio.get_running_loop()
+        loop_av = asyncio.get_running_loop()
         while True:
             try:
                 frame = await track.recv()
@@ -680,6 +702,7 @@ class MediaRecorder:
                     self.__container.mux(packet)
 
             else:
+                start_0 = time.perf_counter()
                 # keypoint stream
                 received_keypoints = frame.data
                 asyncio.run_coroutine_threadsafe(self.__keypoints_queue.put(received_keypoints), loop)
@@ -718,7 +741,7 @@ class MediaRecorder:
                             before_predict_time = time.perf_counter()
                             predicted_target = await loop.run_in_executor(pool, model.predict, received_keypoints)
                         after_predict_time = time.perf_counter()
-
+                        print("Prediction Time", after_predict_time - before_predict_time)
                         self.__log_debug("Prediction time for received keypoints %s: %s at time %s using source %s",
                                 frame_index, str(after_predict_time - before_predict_time), 
                                 after_predict_time, received_keypoints['source_index'])
@@ -726,18 +749,38 @@ class MediaRecorder:
                         if self.__recv_times_file is not None:
                             self.__recv_times_file.write(f'Received {frame_index} at {datetime.datetime.now()}\n')
                             self.__recv_times_file.flush()
+                        print("create the thread")
+                        before_av_time = time.perf_counter()
+                        #ProcessPoolExecutor
+                        with concurrent.futures.ProcessPoolExecutor() as executor:
+                            status = executor.map(self.save_av_frame, predicted_target, context, frame_index)
+                        
+                        # ThreadPoolExecutor  
+                        #with concurrent.futures.ThreadPoolExecutor() as pool2:
+                        #    before_av_time = time.perf_counter()
+                        #    status = await loop_av.run_in_executor(pool2, self.save_av_frame, predicted_target, context, frame_index)
+                        
+                        # Normal Thread
+                        #pointer = threading.Thread(self.save_av_frame, args=(predicted_target, context, frame_index, ))
+                        #pointer.start()
+                        #pointer.join()
+                        
+                        after_av_time = time.perf_counter()
 
-                        predicted_frame = av.VideoFrame.from_ndarray(np.array(predicted_target))
-                        predicted_frame = predicted_frame.reformat(format='yuv420p')
+                        print("AV time:", after_av_time - before_av_time)
+                        print("TOTAL time:", time.perf_counter() - start_0)
+
+                        #predicted_frame = av.VideoFrame.from_ndarray(predicted_target)
+                        #predicted_frame = predicted_frame.reformat(format='yuv420p')
                         #predicted_frame.pts = received_keypoints['pts']
 
-                        if self.__save_dir is not None:
-                            predicted_array = np.array(predicted_target)
-                            np.save(os.path.join(self.__save_dir, 
-                                'receiver_frame_%05d.npy' % frame_index), predicted_array)
+                       # if self.__save_dir is not None:
+                       #     predicted_array = np.array(predicted_target)
+                       #     np.save(os.path.join(self.__save_dir, 
+                       #         'receiver_frame_%05d.npy' % frame_index), predicted_array)
                         
-                        for packet in context.stream.encode(predicted_frame):
-                            self.__container.mux(packet)
+                       # for packet in context.stream.encode(predicted_frame):
+                       #     self.__container.mux(packet)
 
                     except:
                         self.__log_debug("Couldn't predict based on received keypoints frame %s",

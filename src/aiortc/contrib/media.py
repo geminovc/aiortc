@@ -20,10 +20,13 @@ from ..mediastreams import AUDIO_PTIME, MediaStreamError, MediaStreamTrack, Keyp
 from first_order_model.fom_wrapper import FirstOrderModel
 
 # instantiate and warm up the model
+print("Entering media.py")
 time_before_instantiation = time.perf_counter()
 config_path = os.environ.get('CONFIG_PATH')
 checkpoint = os.environ.get('CHECKPOINT_PATH', 'None')
+print("Model initiation")
 model = FirstOrderModel(config_path, checkpoint)
+print("warmp-up")
 for i in range(10):
     zero_array = np.random.randint(0, 255, model.get_shape(), dtype=np.uint8)
     zero_kps, src_index = model.extract_keypoints(zero_array)
@@ -751,24 +754,23 @@ class MediaRecorder:
                             self.__recv_times_file.flush()
                         print("create the thread")
                         before_av_time = time.perf_counter()
-                        #ProcessPoolExecutor
-                        with concurrent.futures.ProcessPoolExecutor() as executor:
-                            status = executor.map(self.save_av_frame, predicted_target, context, frame_index)
+                        #ProcessPoolExecutor is not working
+                        #with concurrent.futures.ProcessPoolExecutor() as executor:
+                        #    status = executor.map(self.save_av_frame, predicted_target, context, frame_index)
                         
-                        # ThreadPoolExecutor  
-                        #with concurrent.futures.ThreadPoolExecutor() as pool2:
-                        #    before_av_time = time.perf_counter()
-                        #    status = await loop_av.run_in_executor(pool2, self.save_av_frame, predicted_target, context, frame_index)
+                        # ThreadPoolExecutor is 70 ms   
+                       # with concurrent.futures.ThreadPoolExecutor() as pool2:
+                       #     status = await loop_av.run_in_executor(pool2, self.save_av_frame, predicted_target, context, frame_index)
                         
-                        # Normal Thread
-                        #pointer = threading.Thread(self.save_av_frame, args=(predicted_target, context, frame_index, ))
+                        # Normal Thread is 70ms with pointer.join and 30ms without pointer.join
+                        #pointer = threading.Thread(group=None, target=self.save_av_frame, args=(predicted_target, context, frame_index, ))
                         #pointer.start()
                         #pointer.join()
                         
                         after_av_time = time.perf_counter()
 
-                        print("AV time:", after_av_time - before_av_time)
-                        print("TOTAL time:", time.perf_counter() - start_0)
+                        print(frame_index, "AV time:", after_av_time - before_av_time)
+                        print(frame_index, "TOTAL time:", time.perf_counter() - start_0)
 
                         #predicted_frame = av.VideoFrame.from_ndarray(predicted_target)
                         #predicted_frame = predicted_frame.reformat(format='yuv420p')
@@ -782,7 +784,8 @@ class MediaRecorder:
                        # for packet in context.stream.encode(predicted_frame):
                        #     self.__container.mux(packet)
 
-                    except:
+                    except Exception as e:
+                        print("error is", e)
                         self.__log_debug("Couldn't predict based on received keypoints frame %s",
                                         received_keypoints['frame_index'])
 

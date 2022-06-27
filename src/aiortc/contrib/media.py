@@ -10,6 +10,7 @@ import numpy as np
 import concurrent.futures
 import os
 import datetime
+from skimage.metrics import structural_similarity as compare_ssim
 
 import av
 from av import AudioFrame, VideoFrame
@@ -18,6 +19,9 @@ from av.frame import Frame
 from ..mediastreams import AUDIO_PTIME, MediaStreamError, MediaStreamTrack, KeypointsFrame
 
 from first_order_model.fom_wrapper import FirstOrderModel
+
+#TODO: fix the pipeline to propagate this
+reference_selection_at_sender = "prediction_quality"
 
 # instantiate and warm up the model
 time_before_instantiation = time.perf_counter()
@@ -162,9 +166,52 @@ class MediaBlackhole:
         self.__tracks = {}
 
 
+def place_frame_in_video_queue(frame, loop, video_track, container):
+    """ place the attached frame in the video track queue after stamping it 
+    """
+    frame_time = frame.time
+    frame_index = frame.index
+    frame = stamp_frame(frame, frame.index, frame.pts, frame.time_base)
+    
+    logger.warning(
+        "MediaPlayer(%s) Put video frame %s in the queue: %s",
+        container.name, str(frame_index), str(frame)
+    )
+    asyncio.run_coroutine_threadsafe(video_track._queue.put((frame, frame_time, \
+                                     frame_index, frame.pts)), loop)
+
+
+def requires_updated_reference(keypoints, frame_index, original_frame, method="prediction_quality"):
+    """ detect if the system needs an updated reference using one of multiple methods 
+    """
+    source_frame_index = keypoints['source_index']
+
+    if frame_index == 0:
+        return True
+
+    if method == "prediction_quality":
+        logger.warning("Calling predict at sender for frame %s with source frame %s",
+                       frame_index, source_frame_index)
+        
+        before_predict_time = time.perf_counter()
+        predicted_target = model.predict(keypoints)
+        after_predict_time = time.perf_counter()
+        logger.warning("Prediction time before sending keypoints %s: %s at time %s using source %s",
+                       frame_index, str(after_predict_time - before_predict_time), 
+                       after_predict_time, keypoints['source_index'])
+
+        prediction_ssim = compare_ssim(original_frame, predicted_target, multichannel=True)
+        if prediction_ssim < 0.85:
+            print(frame_index, prediction_ssim)
+
+        return prediction_ssim < 0.85
+
+    return False
+
+
 def player_worker(
     loop, container, streams, audio_track, video_track, keypoints_track, quit_event, 
-    throttle_playback, save_dir, enable_prediction, reference_update_freq
+    throttle_playback, save_dir, enable_prediction, reference_update_freq, send_times_file,
 ):
     audio_fifo = av.AudioFifo()
     audio_format_name = "s16"
@@ -260,6 +307,8 @@ def player_worker(
             
             frame_time = frame.time
             frame_array = frame.to_rgb().to_ndarray()
+            frame_index = frame.index
+            frame_pts = frame.pts
             if save_dir is not None:
                 np.save(os.path.join(save_dir, 'sender_frame_%05d.npy' % frame.index), 
                         frame_array)
@@ -268,25 +317,66 @@ def player_worker(
             if enable_prediction:
                 logger.warning(
                     "MediaPlayer(%s) Put frame %s in keypoints queue: %s",
-                     container.name, str(frame.index), str(frame)
-                )
-                asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((frame_array, frame_time, \
-                        frame.index, frame.pts)), loop)
+                    container.name, str(frame.index), str(frame)
+                )            
+                
+                # record time before extracting keypoints
+                send_times_file.write(f'Sent {frame_index} at {datetime.datetime.now()}\n')
+                try:
+                    time_before_keypoints = time.perf_counter()
+                    keypoints, source_frame_index = model.extract_keypoints(frame_array)
+                    time_after_keypoints = time.perf_counter()
+                    logger.warning(
+                        "Keypoints extraction time for frame index %s in sender: %s, Suggested reference %s",
+                        str(frame_index), str(time_after_keypoints - time_before_keypoints), str(source_frame_index)
+                    )
+                    
+                except:
+                    keypoints = None
+                    logger.warning(
+                        "MediaPlayer(%s) Could not extract the keypoints for frame index %s", 
+                        container.name, str(frame_index)
+                    )
+
+                if keypoints is None:
+                    continue
+
+                # TODO: run prediction if need be
+                if reference_selection_at_sender is not None:
+                    keypoints['source_index'] = source_frame_index
+                    if requires_updated_reference(keypoints, frame_index, frame_array, reference_selection_at_sender):
+                        time_before_update = time.perf_counter()
+                        model.update_source(frame_index, frame_array, keypoints)
+                        source_frame_index = frame_index
+                        time_after_update = time.perf_counter()
+                        logger.warning(
+                            "Time to update source frame with index %s in sender: %s",
+                            str(frame_index), str(time_after_update - time_before_update)
+                        )
+                        place_frame_in_video_queue(frame, loop, video_track, container)
+                        send_times_file.write(f'Sent {frame_index} at {datetime.datetime.now()} (video) \n')
+                
+                elif (frame.index % reference_update_freq == 0):
+                    time_before_update = time.perf_counter()
+                    model.update_source(frame_index, frame_array, keypoints)
+                    source_frame_index = frame_index
+                    time_after_update = time.perf_counter()
+                    logger.warning(
+                        "Time to update source frame with index %s in sender: %s",
+                        str(frame_index), str(time_after_update - time_before_update)
+                    )
+                    place_frame_in_video_queue(frame, loop, video_track, container)
+                    send_times_file.write(f'Sent {frame_index} at {datetime.datetime.now()} (video) \n')
+                        
+                keypoints_frame = KeypointsFrame(keypoints, frame_pts, frame_index, 
+                                                 source_frame_index) 
+                asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((keypoints_frame, frame_time, \
+                                     frame_index, frame.pts)), loop)
 
             # Only add video frame is this is meant to be used as a source \
             # frame or if prediction is disabled
-            if (enable_prediction and frame.index % reference_update_freq == 0) or \
-                    not enable_prediction:
-                frame_time = frame.time
-                frame_index = frame.index
-                frame = stamp_frame(frame, frame.index, frame.pts, frame.time_base)
-                
-                logger.warning(
-                    "MediaPlayer(%s) Put video frame %s in the queue: %s",
-                     container.name, str(frame_index), str(frame)
-                )
-                asyncio.run_coroutine_threadsafe(video_track._queue.put((frame, frame_time, \
-                        frame_index, frame.pts)), loop)
+            if not enable_prediction:
+                place_frame_in_video_queue(frame, loop, video_track, container)
 
 
 class PlayerStreamTrack(MediaStreamTrack):
@@ -323,48 +413,11 @@ class PlayerStreamTrack(MediaStreamTrack):
 
         # record send time just before sending it on wire
         if self._player._send_times_file is not None:
-            if self._player._enable_prediction and self.kind == "keypoints":
-                self._player._send_times_file.write(f'Sent {frame_index} at {datetime.datetime.now()}\n')
-            elif self._player._enable_prediction and self.kind == "video":
-                self._player._send_times_file.write(
-                        f'Sent {frame_index} at {datetime.datetime.now()} (video) \n')
-            elif self.kind == "video":
+            if not self._player._enable_prediction and self.kind == "video":
                 self._player._send_times_file.write(f'Sent {frame_index} at {datetime.datetime.now()}\n')
             self._player._send_times_file.flush()
         
-        # extract keypoints before sending
-        if self.kind == "keypoints": 
-            try:
-                frame_array = frame 
-                time_before_keypoints = time.perf_counter()
-                loop = asyncio.get_running_loop()
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    keypoints, source_frame_index = await loop.run_in_executor(pool, model.extract_keypoints, frame_array)
-                time_after_keypoints = time.perf_counter()
-                logger.warning(
-                    "Keypoints extraction time for frame index %s in sender: %s",
-                    str(frame_index), str(time_after_keypoints - time_before_keypoints)
-                )
-                keypoints_frame = KeypointsFrame(keypoints, frame_pts, frame_index, source_frame_index) 
-                
-                if frame_index % self._player._reference_update_freq == 0:
-                    time_before_update = time.perf_counter()
-                    model.update_source(frame_index, frame_array, keypoints)
-                    time_after_update = time.perf_counter()
-                    logger.warning(
-                        "Time to update source frame with index %s in sender: %s",
-                        str(frame_index), str(time_after_update - time_before_update)
-                    )
-            except:
-                keypoints_frame = None
-                logger.warning(
-                    "MediaPlayer(%s) Could not extract the keypoints for frame index %s", str(frame_index)
-                )
-
-            if keypoints_frame is not None:
-                return keypoints_frame
-        else:
-            return frame
+        return frame
 
     def stop(self):
         super().stop()
@@ -492,6 +545,7 @@ class MediaPlayer:
                     self.__save_dir,
                     self._enable_prediction,
                     self._reference_update_freq,
+                    self._send_times_file,
                 ),
             )
             self.__thread.start()
@@ -701,10 +755,15 @@ class MediaRecorder:
                     try:
                         received_keypoints = await self.__keypoints_queue.get()
                         frame_index = received_keypoints['frame_index']
+                        source_frame_index = received_keypoints['source_index']
+                        self.__log_debug("Keypoints from queue at receiver for frame %s received at time %s needs source %s",
+                                 str(frame_index), time.perf_counter(), source_frame_index)
 
-                        if frame_index % self.__reference_update_freq == 0:
+                        while source_frame_index not in model.source_frames: 
                             source_frame_array, source_keypoints, video_frame_index = await self.__video_queue.get()
-                            
+                            print("trying to find source frame for src frame index", source_frame_index, "found frame",
+                                    video_frame_index, "source frames", model.source_frames.keys())
+                         
                             time_before_update = time.perf_counter()
                             model.update_source(video_frame_index, source_frame_array, source_keypoints)
                             time_after_update = time.perf_counter()

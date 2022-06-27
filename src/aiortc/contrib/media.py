@@ -64,12 +64,13 @@ REAL_TIME_FORMATS = [
 NUM_ROWS = 10
 NUMBER_OF_BITS = 16
 
+
 def stamp_frame(frame, frame_index, frame_pts, frame_time_base):
     """ stamp frame with barcode for frame index before transmission
     """
     frame_array = frame.to_rgb().to_ndarray()
     stamped_frame = np.zeros((frame_array.shape[0] + NUM_ROWS, 
-                            frame_array.shape[1], frame_array.shape[2]))
+                              frame_array.shape[1], frame_array.shape[2]))
     k = frame_array.shape[1] // NUMBER_OF_BITS
     stamped_frame[:-NUM_ROWS, :, :] = frame_array
     id_str = f'{frame_index+1:0{NUMBER_OF_BITS}b}' 
@@ -78,15 +79,15 @@ def stamp_frame(frame, frame_index, frame_pts, frame_time_base):
         if id_str[i] == '0':
             for j in range(k):
                 for s in range(NUM_ROWS):
-                    stamped_frame[-s-1, i * k + j, 0] = 0
-                    stamped_frame[-s-1, i * k + j, 1] = 0
-                    stamped_frame[-s-1, i * k + j, 2] = 0
+                    stamped_frame[-s - 1, i * k + j, 0] = 0
+                    stamped_frame[-s - 1, i * k + j, 1] = 0
+                    stamped_frame[-s - 1, i * k + j, 2] = 0
         elif id_str[i] == '1':
             for j in range(k):
                 for s in range(NUM_ROWS):
-                    stamped_frame[-s-1, i * k + j, 0] = 255
-                    stamped_frame[-s-1, i * k + j, 1] = 255
-                    stamped_frame[-s-1, i * k + j, 2] = 255
+                    stamped_frame[-s - 1, i * k + j, 0] = 255
+                    stamped_frame[-s - 1, i * k + j, 1] = 255
+                    stamped_frame[-s - 1, i * k + j, 2] = 255
 
     stamped_frame = np.uint8(stamped_frame)
     final_frame = av.VideoFrame.from_ndarray(stamped_frame)
@@ -104,12 +105,12 @@ def destamp_frame(frame):
 
     frame_id = frame_array[-NUM_ROWS:, :, :]
     frame_id = frame_id.mean(0)
-    frame_id = frame_id[frame_array.shape[1] - k*NUMBER_OF_BITS:, :]
+    frame_id = frame_id[frame_array.shape[1] - k * NUMBER_OF_BITS:, :]
 
     frame_id = np.reshape(frame_id, [NUMBER_OF_BITS, k, 3])
-    frame_id = frame_id.mean(axis=(1,2))
+    frame_id = frame_id.mean(axis=(1, 2))
 
-    frame_id = (frame_id > (frame_id.max() + frame_id.min()) / 2 * 1.2 ).astype(int)
+    frame_id = (frame_id > (frame_id.max() + frame_id.min()) / 2 * 1.2).astype(int)
     frame_id = ((2 ** (NUMBER_OF_BITS - 1 - np.arange(NUMBER_OF_BITS))) * frame_id).sum()
     frame_id = frame_id - 1
 
@@ -184,7 +185,7 @@ def player_worker(
         try:
             frame = next(container.decode(*streams))
             if isinstance(frame, VideoFrame) and video_track:
-                logger.debug(f"MediaPlayerWorker Frame size:%d Index:%d Factor:%d",
+                logger.debug("MediaPlayerWorker Frame size:%d Index:%d Factor:%d",
                         sys.getsizeof(frame), 
                         frame.index, video_track._fps_factor)
                 if frame.index % video_track._fps_factor != 0:
@@ -373,7 +374,7 @@ class PlayerStreamTrack(MediaStreamTrack):
             self._player = None
 
     def __log_debug(self, msg: str, *args) -> None:
-        logger.debug(f"PlayerStreamTrack(%s) {msg}", self.__container.name, *args)
+        logger.debug(f"PlayerStreamTrack {msg}", *args)
 
 class MediaPlayer:
     """
@@ -509,8 +510,8 @@ class MediaPlayer:
             self.__container.close()
             self.__container = None
 
-        if self.__send_times_file is not None:
-            self.__send_times_file.close()
+        if self._send_times_file is not None:
+            self._send_times_file.close()
 
     def __log_debug(self, msg: str, *args) -> None:
         logger.debug(f"MediaPlayer(%s) {msg}", self.__container.name, *args)
@@ -594,7 +595,7 @@ class MediaRecorder:
         """
         if self.__frame_width is not None and self.__frame_height is not None:
             if self.__tracks[track].stream.height != self.__frame_height or \
-            self.__tracks[track].stream.width != self.__frame_width:
+               self.__tracks[track].stream.width != self.__frame_width:
                 self.__log_debug("Setting video width to %s and video height to %s.", str(self.__frame_width), str(self.__frame_height))
                 self.__tracks[track].stream.height = self.__frame_height
                 self.__tracks[track].stream.width = self.__frame_width
@@ -645,23 +646,24 @@ class MediaRecorder:
                 if self.__enable_prediction:
                     # update model related info with most recent frame
                     self.__log_debug("Received source video frame %s with index %s at time %s",
-                                    frame, video_frame_index, datetime.datetime.now())
+                                     frame, video_frame_index, datetime.datetime.now())
                     source_frame_array = frame.to_rgb().to_ndarray()
                     
                     time_before_keypoints = time.perf_counter()
                     with concurrent.futures.ThreadPoolExecutor() as pool:
                         source_keypoints, _  = await loop.run_in_executor(pool, 
-                                            model.extract_keypoints, source_frame_array)
+                                               model.extract_keypoints, source_frame_array)
                     time_after_keypoints = time.perf_counter()
                     self.__log_debug("Source keypoints extraction time in receiver: %s",
-                                    str(time_after_keypoints - time_before_keypoints))
+                                     str(time_after_keypoints - time_before_keypoints))
 
-                    asyncio.run_coroutine_threadsafe(self.__video_queue.put((source_frame_array, source_keypoints, video_frame_index)), loop)
+                    asyncio.run_coroutine_threadsafe(self.__video_queue.put((source_frame_array, 
+                                                     source_keypoints, video_frame_index)), loop)
 
                 else:
                     # regular video stream
                     self.__log_debug("Received original video frame %s with index %s at time %s",
-                                    frame, video_frame_index, datetime.datetime.now())
+                                     frame, video_frame_index, datetime.datetime.now())
                     self.__setsize(track)
                         
                     if self.__recv_times_file is not None:
@@ -671,7 +673,7 @@ class MediaRecorder:
                     if self.__save_dir is not None:
                         frame_array = frame.to_rgb().to_ndarray()
                         np.save(os.path.join(self.__save_dir, 
-                            'receiver_frame_%05d.npy' % video_frame_index), frame_array)
+                                'receiver_frame_%05d.npy' % video_frame_index), frame_array)
 
                     for packet in context.stream.encode(frame):
                         self.__container.mux(packet)
@@ -686,7 +688,7 @@ class MediaRecorder:
                 asyncio.run_coroutine_threadsafe(self.__keypoints_queue.put(received_keypoints), loop)
                 frame_index = received_keypoints['frame_index']
                 self.__log_debug("Keypoints for frame %s received at time %s",
-                                str(frame_index), time.perf_counter())
+                                 str(frame_index), time.perf_counter())
 
                 if save_keypoints_to_file:
                     keypoints_file = open(self.__keypoints_file_name, "a")
@@ -706,23 +708,22 @@ class MediaRecorder:
                             time_before_update = time.perf_counter()
                             model.update_source(video_frame_index, source_frame_array, source_keypoints)
                             time_after_update = time.perf_counter()
-                            self.__log_debug("Time to update source frame %s in receiver" \
-                                    " when receiving keypoint %s: %s",
-                                    video_frame_index, frame_index, str(time_after_update - time_before_update))
+                            self.__log_debug("Time to update source frame %s in receiver when receiving keypoint %s: %s",
+                                             video_frame_index, frame_index, str(time_after_update - time_before_update))
                             if self.__save_dir is not None:
                                 np.save(os.path.join(self.__save_dir, 
                                     'reference_frame_%05d.npy' % video_frame_index), source_frame_array)
 
                         with concurrent.futures.ThreadPoolExecutor() as pool:
                             self.__log_debug("Calling predict for frame %s with source frame %s",
-                                        frame_index, received_keypoints['source_index'])
+                                             frame_index, received_keypoints['source_index'])
                             before_predict_time = time.perf_counter()
                             predicted_target = await loop.run_in_executor(pool, model.predict, received_keypoints)
                         after_predict_time = time.perf_counter()
 
                         self.__log_debug("Prediction time for received keypoints %s: %s at time %s using source %s",
-                                frame_index, str(after_predict_time - before_predict_time), 
-                                after_predict_time, received_keypoints['source_index'])
+                                         frame_index, str(after_predict_time - before_predict_time), 
+                                         after_predict_time, received_keypoints['source_index'])
                         
                         if self.__recv_times_file is not None:
                             self.__recv_times_file.write(f'Received {frame_index} at {datetime.datetime.now()}\n')
@@ -742,7 +743,7 @@ class MediaRecorder:
 
                     except:
                         self.__log_debug("Couldn't predict based on received keypoints frame %s",
-                                        received_keypoints['frame_index'])
+                                         received_keypoints['frame_index'])
 
     def __log_debug(self, msg: str, *args) -> None:
         logger.debug(f"MediaRecorder(%s) {msg}", self.__container.name, *args)

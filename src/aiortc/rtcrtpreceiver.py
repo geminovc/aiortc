@@ -250,7 +250,7 @@ class RTCRtpReceiver:
     :param transport: An :class:`RTCDtlsTransport`.
     """
 
-    def __init__(self, kind: str, transport: RTCDtlsTransport) -> None:
+    def __init__(self, kind: str, transport: RTCDtlsTransport, lr_sizes = [128]) -> None:
         if transport.state == "closed":
             raise InvalidStateError
 
@@ -443,6 +443,7 @@ class RTCRtpReceiver:
         """
         self.__log_debug("< RTP %s arrival time:%d %s", 
                          packet, arrival_time_ms, datetime.datetime.now())
+        self.__log_debug("< RTP packet data %s", packet.payload)
 
         """
         if (packet.sequence_number == 3000):
@@ -497,9 +498,9 @@ class RTCRtpReceiver:
             if original_ssrc is None:
                 self.__log_debug("x RTX packet from unknown SSRC %d", packet.ssrc)
                 return
-
-            if len(packet.payload) < 2:
-                return
+            #TODO: change res to res7 to make the len > 2
+            #if len(packet.payload) < 2:
+            #    return
 
             codec = self.__codecs[codec.parameters["apt"]]
             packet = unwrap_rtx(
@@ -515,7 +516,14 @@ class RTCRtpReceiver:
         # parse codec-specific information
         try:
             if packet.payload:
-                packet._data = depayload(codec, packet.payload)  # type: ignore
+                self.__log_debug(" in here1 packet data %s", packet.payload)
+                self.__log_debug(" equality %s", packet.payload != bytes(f'res7', 'utf-8'))
+                if packet.payload != bytes([7]):
+                    self.__log_debug("depayload %s", packet.payload)
+                    packet._data = depayload(codec, packet.payload)  # type: ignore
+                else:
+                    self.__log_debug("resolution %s", packet.payload)
+                    packet._data = packet.payload
             else:
                 packet._data = b""  # type: ignore
         except ValueError as exc:
@@ -523,6 +531,7 @@ class RTCRtpReceiver:
             return
 
         # try to re-assemble encoded frame
+        self.__log_debug("put in jitterbuffer  %s", packet.payload)
         pli_flag, encoded_frame = self.__jitter_buffer.add(packet)
         # check if the PLI should be sent
         if pli_flag:
@@ -537,6 +546,11 @@ class RTCRtpReceiver:
             encoded_frame.timestamp = self.__timestamp_mapper.map(
                 encoded_frame.timestamp
             )
+            self.__log_debug(" < encoded_frame here4  %s", encoded_frame.data)
+            """ parse the resolution from the payload """
+            data = encoded_frame.data
+            frame_resolution = int(data[0])
+            encoded_frame.data = data[1:]
             self.__decoder_queue.put((codec, encoded_frame))
             self.__log_debug("Put frame timestamp %s into decoder queue at time %s", 
                              encoded_frame.timestamp, datetime.datetime.now())

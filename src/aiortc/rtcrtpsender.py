@@ -54,7 +54,8 @@ class RTCRtpSender:
     :param transport: An :class:`RTCDtlsTransport`.
     """
 
-    def __init__(self, trackOrKind: Union[MediaStreamTrack, str], transport, quantizer, target_bitrate, enable_gcc) -> None:
+    def __init__(self, trackOrKind: Union[MediaStreamTrack, str], transport, quantizer, 
+            target_bitrate, enable_gcc, low_res_sizes=[128]) -> None:
         if transport.state == "closed":
             raise InvalidStateError
 
@@ -69,10 +70,13 @@ class RTCRtpSender:
         self._rtx_ssrc = random32()
         # FIXME: how should this be initialised?
         self._stream_id = str(uuid.uuid4())
-        self.__encoder: Optional[Encoder] = None
+        self.__lr_encoders : Dict[int, Optional[Encoder]] = {}
+        self.__encoder : Optional[Encoder] = None
         self.__force_keyframe = False
+        self.__low_res_sizes = low_res_sizes
         self.__quantizer = quantizer
         self.__target_bitrate = target_bitrate
+        self.__gcc_target_bitrate = None
         self.__enable_gcc = enable_gcc
         self.__loop = asyncio.get_event_loop()
         self.__mid: Optional[str] = None
@@ -252,28 +256,68 @@ class RTCRtpSender:
                     self.__log_debug(
                         "- receiver estimated maximum bitrate %d bps at time %s", bitrate, datetime.datetime.now()
                     )
-                    if self.__encoder and hasattr(self.__encoder, "target_bitrate"):
+                    self.__gcc_target_bitrate = bitrate
+                    if self.__encoder and hasattr(self.__encoder, "target_bitrate") and self.__kind != 'lr_video':
                         self.__encoder.target_bitrate = bitrate
             except ValueError:
                 pass
+
+
+    def get_lr_size_by_gcc(self, bitrate):
+        self.lr_size_bitrate_dict = {(0, 30000): 128,
+                                     (30000, 60000): 256,
+                                     (60000, 90000): 256,
+                                     (90000, 600000): 512,
+                                     (600000, 3000000): 1024}
+
+        for low, high in self.lr_size_bitrate_dict.keys():
+            if low <= bitrate < high:
+                return self.lr_size_bitrate_dict[(low, high)]
+        return 1024
+
 
     async def _next_encoded_frame(self, codec: RTCRtpCodecParameters):
         # get frame
         frame = await self.__track.recv()
 
-        # encode frame
-        if self.__encoder is None:
-            self.__encoder = get_encoder(codec)
+        # get the correct encoder
+        if self.__kind == "lr_video":
+
+            if self.__gcc_target_bitrate is not None:
+                lr_size = self.get_lr_size_by_gcc(self.__gcc_target_bitrate)
+            else:
+                lr_size = 128 # frame.shape[0]
+
+            lr_size = 128
+            # TODO: convert to toch downsample and do paralell
+            # TODO: fix the frame stamp situation, maybe we need to stamp the frame here after resizing
+            if frame.width != lr_size:
+                """ not frame height because of the stamps"""
+                frame = frame.reformat(width=lr_size, height=lr_size,interpolation='BICUBIC')
+
+            if lr_size not in self.__lr_encoders.keys():
+                self.__lr_encoders[lr_size] = None
+
+            if self.__lr_encoders[lr_size] == None:
+                self.__lr_encoders[lr_size] = get_encoder(codec)
+
+            self.__encoder = self.__lr_encoders[lr_size]
+
+        else: # "video", "audio", "keypoints"
+            lr_size = frame.width
+            if self.__encoder is None:
+                self.__encoder = get_encoder(codec)
+ 
         force_keyframe = self.__force_keyframe
         quantizer = self.__quantizer
-        target_bitrate = self.__target_bitrate
+        target_bitrate = self.__target_bitrate #TODO or self.__gcc_target_bitrate
         enable_gcc = self.__enable_gcc
         self.__force_keyframe = False
         self.__log_debug("encoding frame with force keyframe %s at time %s", 
                         force_keyframe, datetime.datetime.now())
         return await self.__loop.run_in_executor(
             None, self.__encoder.encode, frame, force_keyframe, quantizer, target_bitrate, enable_gcc
-        )
+        ), lr_size
 
     async def _retransmit(self, sequence_number: int) -> None:
         """
@@ -313,12 +357,18 @@ class RTCRtpSender:
                     continue
 
                 counter += 1
-                payloads, timestamp = await self._next_encoded_frame(codec)
+                (payloads, timestamp), lr_size = await self._next_encoded_frame(codec)
                 self.__log_debug("Frame %s is encoded with timestamp %s with len %s at time %s", 
                                 counter, timestamp, sum([len(i) for i in payloads]), datetime.datetime.now())
                 old_timestamp = timestamp
                 timestamp = uint32_add(timestamp_origin, timestamp)
-
+                """ Adding the resolution of frame (lr_size) as one byte
+                    to the payload. resolution = 2 ** (int(resolution_payload))
+                """
+                # 2, 4, 32, 64, 128, 256, 512, 1024
+                resolution_payload = bytes([7])  #must be an integer to add to bytearray
+                payloads= [resolution_payload] + payloads
+                self.__log_debug("> payloads %s", payloads)
                 for i, payload in enumerate(payloads):
                     packet = RtpPacket(
                         payload_type=codec.payloadType,
@@ -342,6 +392,8 @@ class RTCRtpSender:
                         packet.sequence_number % RTP_HISTORY_SIZE
                     ] = packet
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
+                    if payload == resolution_payload:
+                        self.__log_debug("> RTP sent resolution_payload ")
                     await self.transport._send_rtp(packet_bytes)
 
                     self.__ntp_timestamp = clock.current_ntp_time()

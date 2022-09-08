@@ -250,12 +250,12 @@ class RTCRtpReceiver:
     :param transport: An :class:`RTCDtlsTransport`.
     """
 
-    def __init__(self, kind: str, transport: RTCDtlsTransport, lr_sizes = [128]) -> None:
+    def __init__(self, kind: str, transport: RTCDtlsTransport, low_res_sizes = [256]) -> None:
         if transport.state == "closed":
             raise InvalidStateError
 
         self.__active_ssrc: Dict[int, datetime.datetime] = {}
-        self.__codecs: Dict[int, RTCRtpCodecParameters] = {}
+        self.__codecs: Dict[tuple, RTCRtpCodecParameters] = {}
         self.__decoder_queue: queue.Queue = queue.Queue()
         self.__decoder_thread: Optional[threading.Thread] = None
         self.__kind = kind
@@ -271,11 +271,20 @@ class RTCRtpReceiver:
             self.__jitter_buffer = JitterBuffer(capacity=128, is_video=True)
             self.__nack_generator = NackGenerator()
             self.__remote_bitrate_estimator = RemoteBitrateEstimator()
+            self.__stream_resolutions = low_res_sizes
+            self.__current_stream_resoluton = 256 #low_res_sizes[0]
+            #self.__decoder_queues: Dict[int, queue.Queue] = {}
+            #if lr_size in low_res_sizes:
+            #    self.__decoder_queues[lr_size] = queue.Queue()
+
         else:
             # for "video"
             self.__jitter_buffer = JitterBuffer(capacity=128, is_video=True)
             self.__nack_generator = NackGenerator()
             self.__remote_bitrate_estimator = RemoteBitrateEstimator()
+            self.__stream_resolutions = [1024]
+            self.__current_stream_resoluton = 1024
+
         self._track: Optional[RemoteStreamTrack] = None
         self.__rtcp_exited = asyncio.Event()
         self.__rtcp_task: Optional[asyncio.Future[None]] = None
@@ -369,7 +378,9 @@ class RTCRtpReceiver:
         """
         if not self.__started:
             for codec in parameters.codecs:
-                self.__codecs[codec.payloadType] = codec
+                for resolution in self.__stream_resolutions:
+                    self.__codecs[(codec.payloadType, resolution)] = codec
+ 
             for encoding in parameters.encodings:
                 if encoding.rtx:
                     self.__rtx_ssrc[encoding.rtx.ssrc] = encoding.ssrc
@@ -443,7 +454,6 @@ class RTCRtpReceiver:
         """
         self.__log_debug("< RTP %s arrival time:%d %s", 
                          packet, arrival_time_ms, datetime.datetime.now())
-        self.__log_debug("< RTP packet data %s", packet.payload)
 
         """
         if (packet.sequence_number == 3000):
@@ -480,7 +490,8 @@ class RTCRtpReceiver:
         self.__active_ssrc[packet.ssrc] = clock.current_datetime()
 
         # check the codec is known
-        codec = self.__codecs.get(packet.payload_type)
+        self.__log_debug("check codec %s %s", packet.payload_type, self.__current_stream_resoluton)
+        codec = self.__codecs.get((packet.payload_type, self.__current_stream_resoluton))
         if codec is None:
             self.__log_debug(
                 "x RTP packet with unknown payload type %d", packet.payload_type
@@ -502,7 +513,7 @@ class RTCRtpReceiver:
             #if len(packet.payload) < 2:
             #    return
 
-            codec = self.__codecs[codec.parameters["apt"]]
+            codec = self.__codecs[(codec.parameters["apt"], self.__current_stream_resoluton)]
             packet = unwrap_rtx(
                 packet, payload_type=codec.payloadType, ssrc=original_ssrc
             )
@@ -516,13 +527,11 @@ class RTCRtpReceiver:
         # parse codec-specific information
         try:
             if packet.payload:
-                self.__log_debug(" in here1 packet data %s", packet.payload)
-                if packet.payload not in [bytes([i]) for i in range(1, 9)]:
-                    self.__log_debug("depayload %s", packet.payload)
-                    packet._data = depayload(codec, packet.payload)  # type: ignore
+                if self.__kind == "lr_video" and packet.payload in [bytes([i]) for i in range(1, 9)]:
+                    packet._data = packet.payload  # type: ignore
+                    self.__log_debug("resolution in bytes %s", packet.payload)
                 else:
-                    self.__log_debug("resolution %s", packet.payload)
-                    packet._data = packet.payload
+                    packet._data = depayload(codec, packet.payload)
             else:
                 packet._data = b""  # type: ignore
         except ValueError as exc:
@@ -530,7 +539,6 @@ class RTCRtpReceiver:
             return
 
         # try to re-assemble encoded frame
-        self.__log_debug("put in jitterbuffer  %s", packet.payload)
         pli_flag, encoded_frame = self.__jitter_buffer.add(packet)
         # check if the PLI should be sent
         if pli_flag:
@@ -545,14 +553,18 @@ class RTCRtpReceiver:
             encoded_frame.timestamp = self.__timestamp_mapper.map(
                 encoded_frame.timestamp
             )
-            self.__log_debug(" < encoded_frame here4  %s", encoded_frame.data)
-            """ parse the resolution from the payload """
-            data = encoded_frame.data
-            frame_resolution = int(data[0])
-            encoded_frame.data = data[1:]
+            if self.__kind == "lr_video":
+                """ parse the resolution from the payload for lr_video"""
+                data = encoded_frame.data
+                frame_resolution = 2 ** int(data[0])
+                self.__current_stream_resoluton = frame_resolution
+                encoded_frame.data = data[1:]
+            else:
+                frame_resolution = 1024
+            codec = self.__codecs.get((packet.payload_type, frame_resolution)) 
             self.__decoder_queue.put((codec, encoded_frame))
-            self.__log_debug("Put frame timestamp %s into decoder queue at time %s", 
-                             encoded_frame.timestamp, datetime.datetime.now())
+            self.__log_debug("Put frame timestamp %s into decoder queue with resolution %s at time %s", 
+                             encoded_frame.timestamp, frame_resolution, datetime.datetime.now())
 
     async def _run_rtcp(self) -> None:
         self.__log_debug("- RTCP started")

@@ -36,6 +36,7 @@ from .stats import (
     RTCStatsReport,
 )
 from .utils import random16, random32, uint16_add, uint32_add
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -304,7 +305,7 @@ class RTCRtpSender:
             self.__encoder = self.__lr_encoders[lr_size]
 
         else: # "video", "audio", "keypoints"
-            lr_size = frame.width
+            lr_size = None
             if self.__encoder is None:
                 self.__encoder = get_encoder(codec)
  
@@ -358,17 +359,18 @@ class RTCRtpSender:
 
                 counter += 1
                 (payloads, timestamp), lr_size = await self._next_encoded_frame(codec)
-                self.__log_debug("Frame %s is encoded with timestamp %s with len %s at time %s", 
-                                counter, timestamp, sum([len(i) for i in payloads]), datetime.datetime.now())
+                self.__log_debug("Frame %s is encoded with resolution %s with len %s at time %s", 
+                                counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now())
                 old_timestamp = timestamp
                 timestamp = uint32_add(timestamp_origin, timestamp)
-                """ Adding the resolution of frame (lr_size) as one byte
-                    to the payload. resolution = 2 ** (int(resolution_payload))
-                """
-                # 2, 4, 32, 64, 128, 256, 512, 1024
-                resolution_payload = bytes([8])  #must be an integer to add to bytearray
-                payloads= [resolution_payload] + payloads
-                self.__log_debug("> payloads %s", payloads)
+                if self.__kind == "lr_video":
+                    """ Adding the resolution of frame (lr_size) as one byte
+                        to the payload. resolution = 2 ** (int(resolution_payload))
+                    """
+                    # 2, 4, 32, 64, 128, 256, 512, 1024
+                    resolution_payload = bytes([int(math.log(lr_size,2))])
+                    payloads= [resolution_payload] + payloads
+                    #self.__log_debug("> payloads %s", payloads)
                 for i, payload in enumerate(payloads):
                     packet = RtpPacket(
                         payload_type=codec.payloadType,
@@ -392,8 +394,6 @@ class RTCRtpSender:
                         packet.sequence_number % RTP_HISTORY_SIZE
                     ] = packet
                     packet_bytes = packet.serialize(self.__rtp_header_extensions_map)
-                    if payload == resolution_payload:
-                        self.__log_debug("> RTP sent resolution_payload ")
                     await self.transport._send_rtp(packet_bytes)
 
                     self.__ntp_timestamp = clock.current_ntp_time()

@@ -55,7 +55,7 @@ class RTCRtpSender:
     """
 
     def __init__(self, trackOrKind: Union[MediaStreamTrack, str], transport, quantizer, 
-            target_bitrate, enable_gcc, low_res_sizes=[128]) -> None:
+            target_bitrate, enable_gcc, low_res_sizes=[256]) -> None:
         if transport.state == "closed":
             raise InvalidStateError
 
@@ -288,7 +288,7 @@ class RTCRtpSender:
             else:
                 lr_size = 128 # frame.shape[0]
 
-            lr_size = 128
+            lr_size = 256
             # TODO: convert to toch downsample and do paralell
             # TODO: fix the frame stamp situation, maybe we need to stamp the frame here after resizing
             if frame.width != lr_size:
@@ -366,7 +366,7 @@ class RTCRtpSender:
                     to the payload. resolution = 2 ** (int(resolution_payload))
                 """
                 # 2, 4, 32, 64, 128, 256, 512, 1024
-                resolution_payload = bytes([7])  #must be an integer to add to bytearray
+                resolution_payload = bytes([8])  #must be an integer to add to bytearray
                 payloads= [resolution_payload] + payloads
                 self.__log_debug("> payloads %s", payloads)
                 for i, payload in enumerate(payloads):

@@ -517,8 +517,7 @@ class RTCRtpReceiver:
         try:
             if packet.payload:
                 self.__log_debug(" in here1 packet data %s", packet.payload)
-                self.__log_debug(" equality %s", packet.payload != bytes(f'res7', 'utf-8'))
-                if packet.payload != bytes([7]):
+                if packet.payload not in [bytes([i]) for i in range(1, 9)]:
                     self.__log_debug("depayload %s", packet.payload)
                     packet._data = depayload(codec, packet.payload)  # type: ignore
                 else:

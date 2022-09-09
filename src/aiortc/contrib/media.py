@@ -28,12 +28,28 @@ import yaml
 
 config_path = os.environ.get('CONFIG_PATH', 'None')
 checkpoint = os.environ.get('CHECKPOINT_PATH', 'None')
+low_res_sizes = [64, 128, 256] #, 512]
+
+config_paths = {
+    64: '/video-conf/scratch/vibhaa_tardy/encoder_fixed_bitrate/xiran1024_lr64_tgt45Kb 06_09_22_01.59.42/lr64_tgt45Kb.yaml',
+    128 : '/video-conf/scratch/vibhaa_tardy/encoder_fixed_bitrate/xiran1024_lr128_tgt45Kb 06_09_22_01.59.09/lr128_tgt45Kb.yaml',
+    256: '/video-conf/scratch/vibhaa_tardy/encoder_fixed_bitrate/xiran1024_lr256_tgt75Kb 05_09_22_02.35.02/lr256_tgt75Kb.yaml',
+        512: '/video-conf/scratch/vibhaa_tardy/encoder_fixed_bitrate/xiran1024_lr256_tgt75Kb 05_09_22_02.35.02/lr256_tgt75Kb.yaml'
+}
+
+checkpoint_paths = {
+        64: '/video-conf/scratch/vibhaa_tardy/encoder_fixed_bitrate/xiran1024_lr64_tgt45Kb 06_09_22_01.59.42/00000029-checkpoint.pth.tar',
+        128 : '/video-conf/scratch/vibhaa_tardy/encoder_fixed_bitrate/xiran1024_lr128_tgt45Kb 06_09_22_01.59.09/00000029-checkpoint.pth.tar',
+        256: '/video-conf/scratch/vibhaa_tardy/encoder_fixed_bitrate/xiran1024_lr256_tgt75Kb 05_09_22_02.35.02/00000029-checkpoint.pth.tar',
+        512: '/video-conf/scratch/vibhaa_tardy/encoder_fixed_bitrate/xiran1024_lr256_tgt75Kb 05_09_22_02.35.02/00000029-checkpoint.pth.tar'
+                }
 
 main_configs = get_main_config_params(config_path)
 frame_shape = main_configs['frame_shape']
 generator_type = main_configs['generator_type']
 use_lr_video = main_configs['use_lr_video']
-lr_size = main_configs['lr_size']
+lr_shape = main_configs['lr_size']
+model_zoo = {}
 print(main_configs)
 
 # instantiate and warm up the model
@@ -41,24 +57,43 @@ if generator_type not in ['vpx', 'bicubic']:
     time_before_instantiation = time.perf_counter()
     if generator_type == 'swinir-lte':
         model = SuperResolutionModel(config_path, checkpoint)
-    else:
+    elif use_lr_video: # kp-based model
+        for lr_size in low_res_sizes:
+            model_zoo[lr_size] = FirstOrderModel(config_paths[lr_size], checkpoint_paths[lr_size])
+    else: # lr-video-based model
         model = FirstOrderModel(config_path, checkpoint)
 
-    for i in range(10):
-        random_array = np.random.randint(0, 255, model.get_shape(), dtype=np.uint8)
-        if generator_type != 'swinir-lte':
-            random_kps, src_index = model.extract_keypoints(random_array)
-            model.update_source(src_index, random_array, random_kps)
-            random_kps['source_index'] = src_index
+    for i in range(1):
+        if generator_type not in ['swinir-lte']:
+            """ update reference for models that need reference """
+            if use_lr_video:
+                for lr_size in low_res_sizes:
+                    random_array = np.random.randint(0, 255, model_zoo[lr_size].get_shape(), dtype=np.uint8)
+                    random_kps, src_index = model_zoo[lr_size].extract_keypoints(random_array)
+                    model_zoo[lr_size].update_source(src_index, random_array, random_kps)
+                    random_kps['source_index'] = src_index
+            else: # kp-based model
+                random_array = np.random.randint(0, 255, model.get_shape(), dtype=np.uint8)
+                random_kps, src_index = model_zoo[lr_size].extract_keypoints(random_array)
+                model_zoo[lr_size].update_source(src_index, random_array, random_kps)
+                random_kps['source_index'] = src_index
 
         if use_lr_video:
-            model.predict_with_lr_video(np.random.randint(0, 255, (lr_size, lr_size, 3), dtype=np.uint8))
-        else:
+            if generator_type == 'swinir-lte':
+                model.predict_with_lr_video(np.random.randint(0, 255,
+                        (lr_shape, lr_shape, 3), dtype=np.uint8))
+            else:
+                for lr_size in low_res_sizes:
+                    model_zoo[lr_size].predict_with_lr_video(np.random.randint(0, 255,
+                        (lr_size, lr_size, 3), dtype=np.uint8))
+        else: # kp-based model
             model.predict(random_kps)
     time_after_instantiation = time.perf_counter()
     print("Time to instantiate at time %s: %s" % (datetime.datetime.now(),
         str(time_after_instantiation - time_before_instantiation)))
-    model.reset()
+    if generator_type not in ['swinir-lte'] and use_lr_video:
+        for lr_size in low_res_sizes:
+            model_zoo[lr_size].reset()
 
 save_keypoints_to_file = False
 save_lr_video_npy = False
@@ -534,7 +569,12 @@ class MediaPlayer:
 
                     if prediction_type != "keypoints":
                         frame_tensor = frame_to_tensor(img_as_float32(frame_array), device)
-                        lr_frame_array = resize_tensor_to_array(frame_tensor, lr_video_track._lr_size , device)
+                        if generator_type != 'swinir-lte':
+                            lr_frame_array = resize_tensor_to_array(frame_tensor,
+                                                lr_video_track._lr_size , device)
+                        else:
+                            lr_frame_array = resize_tensor_to_array(frame_tensor, lr_shape , device)
+
                         lr_frame = av.VideoFrame.from_ndarray(lr_frame_array)
                         lr_frame.pts = frame.pts
                         lr_frame.time_base = frame.time_base
@@ -748,8 +788,14 @@ class MediaRecorder:
                         
                         time_before_keypoints = time.perf_counter()
                         with concurrent.futures.ThreadPoolExecutor() as pool:
-                            source_keypoints, _  = await loop.run_in_executor(pool, 
-                                                model.extract_keypoints, source_frame_array)
+                            if use_lr_video:
+                                source_keypoints, _  = await loop.run_in_executor(pool,
+                                        model_zoo[256].extract_keypoints, source_frame_array)
+                                #TODO? what should I do for different re awhich results in
+                                # different source_keypoints
+                            else:
+                                source_keypoints, _  = await loop.run_in_executor(pool,
+                                                    model.extract_keypoints, source_frame_array)
                         time_after_keypoints = time.perf_counter()
                         self.__log_debug("Source keypoints extraction time in receiver: %s",
                                         str(time_after_keypoints - time_before_keypoints))
@@ -821,9 +867,12 @@ class MediaRecorder:
                                 source_frame_array, source_keypoints, source_frame_index = await self.__reference_frames_queue.get()
 
                                 time_before_update = time.perf_counter()
-                                model.update_source(source_frame_index, source_frame_array, source_keypoints)
+                                for lr_size in low_res_sizes:
+                                    model_zoo[lr_size].update_source(source_frame_index,
+                                            source_frame_array, source_keypoints)
+
                                 time_after_update = time.perf_counter()
-                                self.__log_debug("Time to update source frame %s in receiver" \
+                                self.__log_debug("Time to update source frame %s in all receiver models " \
                                         " when receiving %s %s: %s",
                                         source_frame_index, track.kind, frame_index, \
                                         str(time_after_update - time_before_update))
@@ -844,9 +893,14 @@ class MediaRecorder:
                                         predicted_target = lr_frame.reformat(width=frame_shape[0], height=frame_shape[0],\
                                                             interpolation='BICUBIC').to_rgb().to_ndarray()
 
-                                    else:
+                                    elif generator_type == 'swinir-lte':
                                         predicted_target = await loop.run_in_executor(pool, \
                                                 model.predict_with_lr_video, lr_frame_array)
+
+                                    else:
+                                        lr_size = lr_frame_array.shape[1]
+                                        predicted_target = await loop.run_in_executor(pool, \
+                                                model_zoo[lr_size].predict_with_lr_video, lr_frame_array)
 
                             after_predict_time = time.perf_counter()
                             self.__log_debug("Prediction time for received %s %s: %s at time %s",

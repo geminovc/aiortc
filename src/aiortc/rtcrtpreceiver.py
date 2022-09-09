@@ -250,7 +250,7 @@ class RTCRtpReceiver:
     :param transport: An :class:`RTCDtlsTransport`.
     """
 
-    def __init__(self, kind: str, transport: RTCDtlsTransport, low_res_sizes = [256]) -> None:
+    def __init__(self, kind: str, transport: RTCDtlsTransport) -> None:
         if transport.state == "closed":
             raise InvalidStateError
 
@@ -271,12 +271,8 @@ class RTCRtpReceiver:
             self.__jitter_buffer = JitterBuffer(capacity=128, is_video=True)
             self.__nack_generator = NackGenerator()
             self.__remote_bitrate_estimator = RemoteBitrateEstimator()
-            self.__stream_resolutions = low_res_sizes
-            self.__current_stream_resoluton = 256 #low_res_sizes[0]
-            #self.__decoder_queues: Dict[int, queue.Queue] = {}
-            #if lr_size in low_res_sizes:
-            #    self.__decoder_queues[lr_size] = queue.Queue()
-
+            self.__stream_resolutions = [64, 128, 256, 512]
+            self.__current_stream_resoluton = 256
         else:
             # for "video"
             self.__jitter_buffer = JitterBuffer(capacity=128, is_video=True)

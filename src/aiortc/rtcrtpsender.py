@@ -56,7 +56,7 @@ class RTCRtpSender:
     """
 
     def __init__(self, trackOrKind: Union[MediaStreamTrack, str], transport, quantizer, 
-            target_bitrate, enable_gcc, low_res_sizes=[256]) -> None:
+            target_bitrate, enable_gcc) -> None:
         if transport.state == "closed":
             raise InvalidStateError
 
@@ -74,7 +74,6 @@ class RTCRtpSender:
         self.__lr_encoders : Dict[int, Optional[Encoder]] = {}
         self.__encoder : Optional[Encoder] = None
         self.__force_keyframe = False
-        self.__low_res_sizes = low_res_sizes
         self.__quantizer = quantizer
         self.__target_bitrate = target_bitrate
         self.__gcc_target_bitrate = None
@@ -262,7 +261,7 @@ class RTCRtpSender:
                         if self.__gcc_target_bitrate is not None:
                             self.__track._lr_size = 256 #self.get_lr_size_by_gcc(self.__gcc_target_bitrate)
                         else:
-                            self.__track._lr_size = 128 # frame.shape[0]
+                            self.__track._lr_size = 256 # frame.shape[0]
 
                     elif self.__encoder and hasattr(self.__encoder, "target_bitrate"):
                         self.__encoder.target_bitrate = bitrate

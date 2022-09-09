@@ -270,16 +270,24 @@ class RTCRtpSender:
 
 
     def get_lr_size_by_gcc(self, bitrate):
-        self.lr_size_bitrate_dict = {(0, 30000): 128,
-                                     (30000, 60000): 256,
-                                     (60000, 90000): 256,
-                                     (90000, 600000): 512,
-                                     (600000, 3000000): 1024}
-
-        for low, high in self.lr_size_bitrate_dict.keys():
+        self.gcc_bitrate_resolution_dict = {(0, 30000): 128,
+                                            (30000, 60000): 256,
+                                            (60000, 90000): 256,
+                                            (90000, 600000): 512,
+                                            (600000, 3000000): 1024}
+        for low, high in self.gcc_bitrate_resolution_dict.keys():
             if low <= bitrate < high:
-                return self.lr_size_bitrate_dict[(low, high)]
+                return self.gcc_bitrate_resolution_dict[(low, high)]
         return 1024
+
+
+    def get_targte_bitrate_lr_size(self, lr_size):
+        self.lr_size_bitrate_dict = {64: 15000,
+                                     128: 45000,
+                                     256: 75000,
+                                     512: 180000}
+        bitrate = self.lr_size_bitrate_dict[lr_size]
+        return bitrate
 
 
     async def _next_encoded_frame(self, codec: RTCRtpCodecParameters):
@@ -296,15 +304,15 @@ class RTCRtpSender:
                 self.__lr_encoders[lr_size] = get_encoder(codec)
 
             self.__encoder = self.__lr_encoders[lr_size]
-
+            target_bitrate = self.get_targte_bitrate_lr_size(lr_size) #self.__target_bitrate
         else: # "video", "audio", "keypoints"
             lr_size = None
             if self.__encoder is None:
                 self.__encoder = get_encoder(codec)
+            target_bitrate = self.__gcc_target_bitrate
  
         force_keyframe = self.__force_keyframe
         quantizer = self.__quantizer
-        target_bitrate = self.__target_bitrate #TODO or self.__gcc_target_bitrate
         enable_gcc = self.__enable_gcc
         self.__force_keyframe = False
         self.__log_debug("encoding frame with force keyframe %s at time %s", 

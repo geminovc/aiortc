@@ -219,150 +219,6 @@ def requires_updated_reference(keypoints, frame_index, original_frame, lr_frame_
     return False
 
 
-def player_worker(
-    loop, container, streams, audio_track, video_track, keypoints_track, lr_video_track,
-    quit_event, throttle_playback, save_dir, enable_prediction, prediction_type, 
-    reference_update_freq):
-    audio_fifo = av.AudioFifo()
-    audio_format_name = "s16"
-    audio_layout_name = "stereo"
-    audio_sample_rate = 48000
-    audio_samples = 0
-    audio_samples_per_frame = int(audio_sample_rate * AUDIO_PTIME)
-    audio_resampler = av.AudioResampler(
-        format=audio_format_name, layout=audio_layout_name, rate=audio_sample_rate
-    )
-
-    video_first_pts = None
-
-    frame_time = None
-    display_option = 'synthetic'
-    start_time = time.time()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    while not quit_event.is_set():
-        try:
-            frame = next(container.decode(*streams))
-            if isinstance(frame, VideoFrame) and video_track:
-                logger.debug(f"MediaPlayerWorker Frame size:%d Index:%d Factor:%d",
-                        sys.getsizeof(frame), 
-                        frame.index, video_track._fps_factor)
-                if frame.index % video_track._fps_factor != 0:
-                    continue
-        
-        except (av.AVError, StopIteration) as exc:
-            if isinstance(exc, av.FFmpegError) and exc.errno == errno.EAGAIN:
-                time.sleep(0.01)
-                continue
-            if audio_track:
-                logger.warning(
-                    "MediaPlayer(%s) Put None in audio in player_worker",
-                    container.name
-                )
-                asyncio.run_coroutine_threadsafe(audio_track._queue.put((None, None)), loop)
-            if video_track:
-                logger.warning(
-                    "MediaPlayer(%s) Put None in video and keypoints in player_worker",
-                    container.name
-                )
-                asyncio.run_coroutine_threadsafe(video_track._queue.put((None, None)), loop)
-                if enable_prediction:
-                    if prediction_type == 'keypoints':
-                        asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((None, None)), loop)
-                    else:
-                        asyncio.run_coroutine_threadsafe(lr_video_track._queue.put((None, None)), loop)
-            break
-
-        # read up to 1 second ahead
-        if throttle_playback:
-            elapsed_time = time.time() - start_time
-            if frame_time and frame_time > elapsed_time + 1:
-                time.sleep(0.1)
-
-        if isinstance(frame, AudioFrame) and audio_track:
-            if (
-                frame.format.name != audio_format_name
-                or frame.layout.name != audio_layout_name
-                or frame.sample_rate != audio_sample_rate
-            ):
-                frame.pts = None
-                frame = audio_resampler.resample(frame)
-
-            # fix timestamps
-            frame.pts = audio_samples
-            frame.time_base = fractions.Fraction(1, audio_sample_rate)
-            audio_samples += frame.samples
-
-            audio_fifo.write(frame)
-            while True:
-                frame = audio_fifo.read(audio_samples_per_frame)
-                if frame:
-                    frame_time = frame.time
-                    asyncio.run_coroutine_threadsafe(
-                        audio_track._queue.put((frame, frame_time, frame.index, frame.pts)), loop
-                    )
-                else:
-                    break
-        elif isinstance(frame, VideoFrame):
-            if frame.pts is None:  # pragma: no cover
-                logger.warning(
-                    "MediaPlayer(%s) Skipping video frame with no pts",
-                    container.name
-                )
-                continue
-
-            # video from a webcam doesn't start at pts 0, cancel out offset
-            if video_first_pts is None:
-                video_first_pts = frame.pts
-            frame.pts -= video_first_pts
-
-            logger.warning(
-                "MediaPlayer(%s) Video frame %s read from media: %s at time %s",
-                container.name, str(frame.index), str(frame), time.perf_counter()
-            )
-            
-            frame_array = frame.to_rgb().to_ndarray()
-
-            if save_sent_frames and save_dir is not None:
-                np.save(os.path.join(save_dir, 'sender_frame_%05d.npy' % frame.index),
-                        frame_array)
-
-            if enable_prediction:
-                logger.warning(
-                    "MediaPlayer(%s) Put frame %s in keypoints queue: %s",
-                     container.name, str(frame.index), str(frame)
-                )
- 
-                if prediction_type != "keypoints":
-                    frame_tensor = frame_to_tensor(img_as_float32(frame_array), device)
-                    lr_frame_array = resize_tensor_to_array(frame_tensor, lr_size, device)
-
-                    lr_frame = av.VideoFrame.from_ndarray(lr_frame_array)
-                    lr_frame.pts = frame.pts
-                    lr_frame.time_base = frame.time_base
-                    """
-                    We can not re-write the index of an av.VideoFrame and it defaults to 0.
-                    We should use frame.index as lr_frame.index.
-                    """
-
-                    place_frame_in_video_queue(lr_frame, frame.index, loop, lr_video_track, container)
-                    if save_lr_video_npy and save_dir is not None:
-                        np.save(os.path.join(save_dir,
-                                'sender_lr_frame_%05d.npy' % frame.index),
-                                lr_frame_array)
-
-                else:
-                    asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((frame_array, frame.time, \
-                            frame.index, frame.pts)), loop)
-
-            # Only add video frame is this is meant to be used as a source \
-            # frame or if prediction is disabled
-            if video_track is not None:
-                if (enable_prediction and frame.index % reference_update_freq == 0) or \
-                        display_option == 'real' or not enable_prediction:
-                    place_frame_in_video_queue(frame, frame.index, loop, video_track, container)
-
-
 class PlayerStreamTrack(MediaStreamTrack):
     def __init__(self, player, kind, fps_factor=1):
         super().__init__()
@@ -371,6 +227,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         self._queue = asyncio.Queue()
         self._start = None
         self._fps_factor = fps_factor
+        self._lr_size = 256
 
     async def recv(self):
         if self.readyState != "live":
@@ -561,6 +418,148 @@ class MediaPlayer:
         """
         return self.__lr_video
 
+    def player_worker(
+        self, loop, container, streams, audio_track, video_track, keypoints_track, lr_video_track,
+        quit_event, throttle_playback, save_dir, enable_prediction, prediction_type,
+        reference_update_freq):
+        audio_fifo = av.AudioFifo()
+        audio_format_name = "s16"
+        audio_layout_name = "stereo"
+        audio_sample_rate = 48000
+        audio_samples = 0
+        audio_samples_per_frame = int(audio_sample_rate * AUDIO_PTIME)
+        audio_resampler = av.AudioResampler(
+            format=audio_format_name, layout=audio_layout_name, rate=audio_sample_rate
+        )
+
+        video_first_pts = None
+
+        frame_time = None
+        display_option = 'synthetic'
+        start_time = time.time()
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        while not quit_event.is_set():
+            try:
+                frame = next(container.decode(*streams))
+                if isinstance(frame, VideoFrame) and video_track:
+                    logger.debug(f"MediaPlayerWorker Frame size:%d Index:%d Factor:%d",
+                            sys.getsizeof(frame),
+                            frame.index, video_track._fps_factor)
+                    if frame.index % video_track._fps_factor != 0:
+                        continue
+
+            except (av.AVError, StopIteration) as exc:
+                if isinstance(exc, av.FFmpegError) and exc.errno == errno.EAGAIN:
+                    time.sleep(0.01)
+                    continue
+                if audio_track:
+                    logger.warning(
+                        "MediaPlayer(%s) Put None in audio in player_worker",
+                        container.name
+                    )
+                    asyncio.run_coroutine_threadsafe(audio_track._queue.put((None, None)), loop)
+                if video_track:
+                    logger.warning(
+                        "MediaPlayer(%s) Put None in video and keypoints in player_worker",
+                        container.name
+                    )
+                    asyncio.run_coroutine_threadsafe(video_track._queue.put((None, None)), loop)
+                    if enable_prediction:
+                        if prediction_type == 'keypoints':
+                            asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((None, None)), loop)
+                        else:
+                            asyncio.run_coroutine_threadsafe(lr_video_track._queue.put((None, None)), loop)
+                break
+
+            # read up to 1 second ahead
+            if throttle_playback:
+                elapsed_time = time.time() - start_time
+                if frame_time and frame_time > elapsed_time + 1:
+                    time.sleep(0.1)
+
+            if isinstance(frame, AudioFrame) and audio_track:
+                if (
+                    frame.format.name != audio_format_name
+                    or frame.layout.name != audio_layout_name
+                    or frame.sample_rate != audio_sample_rate
+                ):
+                    frame.pts = None
+                    frame = audio_resampler.resample(frame)
+
+                # fix timestamps
+                frame.pts = audio_samples
+                frame.time_base = fractions.Fraction(1, audio_sample_rate)
+                audio_samples += frame.samples
+
+                audio_fifo.write(frame)
+                while True:
+                    frame = audio_fifo.read(audio_samples_per_frame)
+                    if frame:
+                        frame_time = frame.time
+                        asyncio.run_coroutine_threadsafe(
+                            audio_track._queue.put((frame, frame_time, frame.index, frame.pts)), loop
+                        )
+                    else:
+                        break
+            elif isinstance(frame, VideoFrame):
+                if frame.pts is None:  # pragma: no cover
+                    logger.warning(
+                        "MediaPlayer(%s) Skipping video frame with no pts",
+                        container.name
+                    )
+                    continue
+
+                # video from a webcam doesn't start at pts 0, cancel out offset
+                if video_first_pts is None:
+                    video_first_pts = frame.pts
+                frame.pts -= video_first_pts
+
+                logger.warning(
+                    "MediaPlayer(%s) Video frame %s read from media: %s at time %s",
+                    container.name, str(frame.index), str(frame), time.perf_counter()
+                )
+
+                frame_array = frame.to_rgb().to_ndarray()
+
+                if save_sent_frames and save_dir is not None:
+                    np.save(os.path.join(save_dir, 'sender_frame_%05d.npy' % frame.index),
+                            frame_array)
+
+                if enable_prediction:
+                    logger.warning(
+                        "MediaPlayer(%s) Put frame %s in keypoints queue: %s",
+                         container.name, str(frame.index), str(frame)
+                    )
+
+                    if prediction_type != "keypoints":
+                        frame_tensor = frame_to_tensor(img_as_float32(frame_array), device)
+                        lr_frame_array = resize_tensor_to_array(frame_tensor, lr_video_track._lr_size , device)
+                        lr_frame = av.VideoFrame.from_ndarray(lr_frame_array)
+                        lr_frame.pts = frame.pts
+                        lr_frame.time_base = frame.time_base
+                        """
+                        We can not re-write the index of an av.VideoFrame and it defaults to 0.
+                        We should use frame.index as lr_frame.index.
+                        """
+
+                        place_frame_in_video_queue(lr_frame, frame.index, loop, lr_video_track, container)
+                        if save_lr_video_npy and save_dir is not None:
+                            np.save(os.path.join(save_dir,
+                                    'sender_lr_frame_%05d.npy' % frame.index),
+                                    lr_frame_array)
+
+                    else:
+                        asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((frame_array, frame.time, \
+                                frame.index, frame.pts)), loop)
+
+                # Only add video frame is this is meant to be used as a source \
+                # frame or if prediction is disabled
+                if video_track is not None:
+                    if (enable_prediction and frame.index % reference_update_freq == 0) or \
+                            display_option == 'real' or not enable_prediction:
+                        place_frame_in_video_queue(frame, frame.index, loop, video_track, container)
+
     def _start(self, track: PlayerStreamTrack) -> None:
         self.__started.add(track)
         if self.__thread is None:
@@ -568,7 +567,7 @@ class MediaPlayer:
             self.__thread_quit = threading.Event()
             self.__thread = threading.Thread(
                 name="media-player",
-                target=player_worker,
+                target=self.player_worker,
                 args=(
                     asyncio.get_event_loop(),
                     self.__container,

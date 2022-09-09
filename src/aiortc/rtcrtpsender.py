@@ -258,7 +258,13 @@ class RTCRtpSender:
                         "- receiver estimated maximum bitrate %d bps at time %s", bitrate, datetime.datetime.now()
                     )
                     self.__gcc_target_bitrate = bitrate
-                    if self.__encoder and hasattr(self.__encoder, "target_bitrate") and self.__kind != 'lr_video':
+                    if self.__kind == 'lr_video':
+                        if self.__gcc_target_bitrate is not None:
+                            self.__track._lr_size = 256 #self.get_lr_size_by_gcc(self.__gcc_target_bitrate)
+                        else:
+                            self.__track._lr_size = 128 # frame.shape[0]
+
+                    elif self.__encoder and hasattr(self.__encoder, "target_bitrate"):
                         self.__encoder.target_bitrate = bitrate
             except ValueError:
                 pass
@@ -283,19 +289,7 @@ class RTCRtpSender:
 
         # get the correct encoder
         if self.__kind == "lr_video":
-
-            if self.__gcc_target_bitrate is not None:
-                lr_size = self.get_lr_size_by_gcc(self.__gcc_target_bitrate)
-            else:
-                lr_size = 128 # frame.shape[0]
-
-            lr_size = 256
-            # TODO: convert to toch downsample and do paralell
-            # TODO: fix the frame stamp situation, maybe we need to stamp the frame here after resizing
-            if frame.width != lr_size:
-                """ not frame height because of the stamps"""
-                frame = frame.reformat(width=lr_size, height=lr_size,interpolation='BICUBIC')
-
+            lr_size = frame.width
             if lr_size not in self.__lr_encoders.keys():
                 self.__lr_encoders[lr_size] = None
 
@@ -363,7 +357,7 @@ class RTCRtpSender:
                                 counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now())
                 old_timestamp = timestamp
                 timestamp = uint32_add(timestamp_origin, timestamp)
-                if self.__kind == "lr_video":
+                if self.__kind == "lr_video" and lr_size is not None:
                     """ Adding the resolution of frame (lr_size) as one byte
                         to the payload. resolution = 2 ** (int(resolution_payload))
                     """

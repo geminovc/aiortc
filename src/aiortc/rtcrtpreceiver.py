@@ -523,7 +523,7 @@ class RTCRtpReceiver:
         # parse codec-specific information
         try:
             if packet.payload:
-                if self.__kind == "lr_video" and packet.payload in [bytes([i]) for i in range(1, 9)]:
+                if self.__kind == "lr_video" and packet.payload in [bytes([i]) for i in range(1, 11)]:
                     packet._data = packet.payload  # type: ignore
                     self.__log_debug("resolution in bytes %s", packet.payload)
                 else:

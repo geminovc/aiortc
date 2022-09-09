@@ -259,9 +259,9 @@ class RTCRtpSender:
                     self.__gcc_target_bitrate = bitrate
                     if self.__kind == 'lr_video':
                         if self.__gcc_target_bitrate is not None:
-                            self.__track._lr_size = 256 #self.get_lr_size_by_gcc(self.__gcc_target_bitrate)
+                            self.__track._lr_size = self.get_lr_size_by_gcc(self.__gcc_target_bitrate)
                         else:
-                            self.__track._lr_size = 256 # frame.shape[0]
+                            self.__track._lr_size = 256 # default lr_video resolution
 
                     elif self.__encoder and hasattr(self.__encoder, "target_bitrate"):
                         self.__encoder.target_bitrate = bitrate

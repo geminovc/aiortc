@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 import yaml 
 
-reference_selection_at_sender = "fixed_interval" #"prediction_quality"
+reference_selection_at_sender = "prediction_quality"
 
 config_path = os.environ.get('CONFIG_PATH', 'None')
 checkpoint = os.environ.get('CHECKPOINT_PATH', 'None')
@@ -220,24 +220,18 @@ def requires_updated_reference(keypoints, frame_index, original_frame, lr_frame_
         if frame_index % reference_update_freq == 0:
             update_reference = True
 
-            if keypoints is None:
-                keypoints, source_frame_index = model.extract_keypoints(original_frame)
-                keypoints['source_index'] = source_frame_index
-
     elif method == "prediction_quality":
-        if keypoints is None:
-            keypoints, source_frame_index = model.extract_keypoints(original_frame)
-            keypoints['source_index'] = source_frame_index
-
-        source_frame_index = keypoints['source_index']
-        logger.warning("Calling predict at sender for frame %s with source frame %s",
-                        frame_index, source_frame_index)
+        logger.warning("Calling predict at sender for frame %s using source %s",
+                        frame_index, model.last_source_index)
         before_predict_time = time.perf_counter()
-        predicted_target = model.predict(keypoints, lr_frame_array)
+        if lr_frame_array is None:
+            predicted_target = model.predict(keypoints)
+        else:
+            predicted_target = model.predict_with_lr_video(lr_frame_array)
         after_predict_time = time.perf_counter()
         logger.warning("Prediction time before sending frame %s: %s at time %s using source %s",
                        frame_index, str(after_predict_time - before_predict_time),
-                       after_predict_time, keypoints['source_index'])
+                       after_predict_time, model.last_source_index)
 
         prediction_ssim = compare_ssim(original_frame, predicted_target, multichannel=True)
         if prediction_ssim < 0.85:
@@ -248,7 +242,11 @@ def requires_updated_reference(keypoints, frame_index, original_frame, lr_frame_
     #elif method == '':
 
 
-    if update_reference and keypoints is not None:
+    if update_reference:
+        if keypoints is None:
+            keypoints, source_frame_index = model.extract_keypoints(original_frame)
+            keypoints['source_index'] = source_frame_index
+
         time_before_update = time.perf_counter()
         model.update_source(frame_index, original_frame, keypoints)
         time_after_update = time.perf_counter()
@@ -420,8 +418,8 @@ def player_worker(
                 # check to see if the frame should be sent as a reference frame
                 # the function also updates the reference if the response is yes
                 if generator_type not in ['bicubic', 'swinir-lte']:
-                    update_reference = requires_updated_reference(keypoints, frame.index, frame_array, lr_frame_array,
-                                                        reference_selection_at_sender,
+                    update_reference = requires_updated_reference(keypoints, frame.index, frame_array,
+                                                        lr_frame_array, reference_selection_at_sender,
                                                         reference_update_freq)
                 else:
                     """no reference for these generators"""

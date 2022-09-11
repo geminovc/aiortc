@@ -27,7 +27,7 @@ import torch
 import torch.nn.functional as F
 import yaml 
 
-reference_selection_at_sender = "prediction_quality"
+reference_selection_at_sender = "same_tgt_ref_quality" #"prediction_quality"
 
 config_path = os.environ.get('CONFIG_PATH', 'None')
 checkpoint = os.environ.get('CHECKPOINT_PATH', 'None')
@@ -220,29 +220,38 @@ def requires_updated_reference(keypoints, frame_index, original_frame, lr_frame_
         if frame_index % reference_update_freq == 0:
             update_reference = True
 
-    elif method == "prediction_quality":
+    elif method == "prediction_quality" or method == "same_tgt_ref_quality":
+        if keypoints is None:
+            keypoints, source_frame_index = model.extract_keypoints(original_frame)
+            keypoints['source_index'] = source_frame_index
+
         logger.warning("Calling predict at sender for frame %s using source %s",
-                        frame_index, model.last_source_index)
+                        frame_index, source_frame_index)
+
         before_predict_time = time.perf_counter()
-        if lr_frame_array is None:
-            predicted_target = model.predict(keypoints)
-        else:
-            predicted_target = model.predict_with_lr_video(lr_frame_array)
+        predicted_target = model.predict(keypoints, lr_frame_array)
         after_predict_time = time.perf_counter()
         logger.warning("Prediction time before sending frame %s: %s at time %s using source %s",
                        frame_index, str(after_predict_time - before_predict_time),
-                       after_predict_time, model.last_source_index)
+                       after_predict_time, source_frame_index)
 
         prediction_ssim = compare_ssim(original_frame, predicted_target, multichannel=True)
-        if prediction_ssim < 0.85:
-            print(frame_index, prediction_ssim, original_frame.shape, predicted_target.shape)
 
-        update_reference = prediction_ssim < 0.85
+        if method == "prediction_quality":
+            if prediction_ssim < 0.85:
+                print(frame_index, prediction_ssim, original_frame.shape, predicted_target.shape)
 
-    #elif method == '':
+            update_reference = prediction_ssim < 0.85
+        else:
+            """ predict the target using the same frame (source=frame)"""
 
+            same_tgt_ref_predicted = model.predict_with_lr_video_and_source(lr_frame_array,
+                                         original_frame, keypoints)
+            same_tgt_ref_ssim = compare_ssim(original_frame, same_tgt_ref_predicted, multichannel=True)
+            update_reference = prediction_ssim < 0.9 * same_tgt_ref_ssim
 
     if update_reference:
+        print(update_reference, frame_index)
         if keypoints is None:
             keypoints, source_frame_index = model.extract_keypoints(original_frame)
             keypoints['source_index'] = source_frame_index

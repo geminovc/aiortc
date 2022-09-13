@@ -280,10 +280,13 @@ class RTCRtpSender:
 
 
     def get_targte_bitrate_lr_size(self, lr_size):
-        self.lr_size_bitrate_dict = {64: 15000,
-                                     128: 45000,
+        self.lr_size_bitrate_dict = {128: 15000,
+                                     256: 45000,
                                      256: 75000,
-                                     512: 180000}
+                                     256: 105000,
+                                     512: 180000,
+                                     512: 480000,
+                                     1024: 600000}
         bitrate = self.lr_size_bitrate_dict[lr_size]
         return bitrate
 

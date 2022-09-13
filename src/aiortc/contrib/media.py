@@ -42,7 +42,8 @@ lr_shape = main_configs['lr_size']
 print(main_configs)
 
 """ configuring the model zoo for adaptation"""
-low_res_sizes = [64, 128, 256, 512]
+#low_res_sizes = [64, 128, 256, 512]
+low_res_sizes = [128, 256, 512]
 checkpoint_paths = checkpoint_zoo[person]
 model_zoo = {}
 
@@ -252,7 +253,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         self._queue = asyncio.Queue()
         self._start = None
         self._fps_factor = fps_factor
-        self._lr_size = 128 # default lr_video resolution at the start, set it on gcc as well
+        self._lr_size = 256 # default lr_video resolution at the start, set it on receiver.py as well
 
     async def recv(self):
         if self.readyState != "live":
@@ -562,8 +563,12 @@ class MediaPlayer:
                                 lr_video_track._lr_size)
                         frame_tensor = frame_to_tensor(img_as_float32(frame_array), device)
                         if generator_type != 'swinir-lte':
-                            lr_frame_array = resize_tensor_to_array(frame_tensor,
-                                                lr_video_track._lr_size , device)
+                            if lr_video_track._lr_size < 1024:
+                                lr_frame_array = resize_tensor_to_array(frame_tensor,
+                                                    lr_video_track._lr_size , device)
+                            else:
+                                # send the full-res frame
+                                lr_frame_array = frame_array 
                         else:
                             lr_frame_array = resize_tensor_to_array(frame_tensor, lr_shape , device)
 
@@ -838,14 +843,15 @@ class MediaRecorder:
                 elif track.kind == "lr_video":
                     lr_frame, frame_index = destamp_frame(frame)
                     lr_frame_array = lr_frame.to_rgb().to_ndarray()
-                    asyncio.run_coroutine_threadsafe(self.__lr_video_queue.put((lr_frame_array, frame_index)), loop)
+                    asyncio.run_coroutine_threadsafe(self.__lr_video_queue.put((lr_frame, 
+                                                    lr_frame_array, frame_index)), loop)
                     if save_lr_video_npy and self.__save_dir is not None:
                         np.save(os.path.join(self.__save_dir,
                                 'receiver_lr_frame_%05d.npy' % frame_index),
                                 lr_frame_array)
  
-                self.__log_debug("%s for frame %s received at time %s",
-                                track.kind, str(frame_index), datetime.datetime.now())
+                self.__log_debug("%s for frame %s received at time %s with resolution %s",
+                                track.kind, str(frame_index), datetime.datetime.now(), lr_frame.width)
 
                 if self.__enable_prediction:
                     try:
@@ -853,8 +859,10 @@ class MediaRecorder:
                             received_keypoints = await self.__keypoints_queue.get()
                             frame_index = received_keypoints['frame_index']
                         elif track.kind == "lr_video":
-                            lr_frame_array, frame_index = await self.__lr_video_queue.get()
+                            lr_frame, lr_frame_array, frame_index = await self.__lr_video_queue.get()
                         if self.__display_option == "synthetic":
+                            # update reference if need be
+                            # TODO also update if full-res frame has been received
                             if frame_index % self.__reference_update_freq == 0 and \
                                     generator_type not in ['bicubic', 'swinir-lte']:
                                 source_frame_array, source_keypoints_zoo, source_frame_index = await self.__reference_frames_queue.get()
@@ -881,24 +889,29 @@ class MediaRecorder:
                                     predicted_target = await loop.run_in_executor(pool, \
                                             model_zoo['no_lr_video'].predict, received_keypoints)
                                 elif track.kind == "lr_video":
-                                    if generator_type == "bicubic":
-                                        predicted_target = lr_frame.reformat(width=frame_shape[0], height=frame_shape[0],\
-                                                            interpolation='BICUBIC').to_rgb().to_ndarray()
+                                    lr_size = lr_frame_array.shape[1]
+                                    print(lr_size, 'in media')
+                                    if lr_size < 1024:
+                                        if generator_type == "bicubic":
+                                            predicted_target = lr_frame.reformat(width=frame_shape[0], height=frame_shape[0],\
+                                                                interpolation='BICUBIC').to_rgb().to_ndarray()
 
-                                    elif generator_type == 'swinir-lte':
-                                        predicted_target = await loop.run_in_executor(pool, \
-                                                model.predict_with_lr_video, lr_frame_array)
+                                        elif generator_type == 'swinir-lte':
+                                            predicted_target = await loop.run_in_executor(pool, \
+                                                    model.predict_with_lr_video, lr_frame_array)
 
+                                        else:
+                                            self.__log_debug("Using the model with resolution %s from the zoo", lr_size)
+                                            predicted_target = await loop.run_in_executor(pool, \
+                                                    model_zoo[lr_size].predict_with_lr_video, lr_frame_array)
                                     else:
-                                        lr_size = lr_frame_array.shape[1]
-                                        self.__log_debug("Using the model with resolution %s from the zoo", lr_size)
-                                        predicted_target = await loop.run_in_executor(pool, \
-                                                model_zoo[lr_size].predict_with_lr_video, lr_frame_array)
-
-                            after_predict_time = time.perf_counter()
-                            self.__log_debug("Prediction time for received %s %s: %s at time %s",
-                                    track.kind, frame_index, str(after_predict_time - before_predict_time),
-                                    after_predict_time)
+                                        # full-res frame has been received
+                                        print("adding full-res to final video")
+                                        predicted_target = lr_frame_array
+                                after_predict_time = time.perf_counter()
+                                self.__log_debug("Prediction time for received %s %s: %s at time %s for resolution ",
+                                        track.kind, frame_index, str(after_predict_time - before_predict_time),
+                                        after_predict_time, lr_size)
 
                             if self.__recv_times_file is not None:
                                 self.__recv_times_file.write(f'Received {frame_index} at {datetime.datetime.now()}\n')

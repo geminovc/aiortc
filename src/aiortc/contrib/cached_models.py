@@ -1,12 +1,12 @@
 import os
 
-first_order_model_configs = '/data1/pantea/aiortc/nets_implementation/first_order_model/config/paper_configs'
+first_order_model_configs = '/data4/pantea/aiortc/nets_implementation/first_order_model/config/paper_configs'
 final_checkpoints_base = '/video-conf/scratch/vibhaa_tardy/final_results/training_with_encoder'
 
 config_paths = {
     64: f'{first_order_model_configs}/resolution_comparison/lr64_tgt45Kb.yaml',
     128 : f'{first_order_model_configs}/exps_overview/lr128_tgt15Kb.yaml',
-    256: f'{first_order_model_configs}/exps_overview/lr256_tgt75Kb.yaml',
+    256: f'{first_order_model_configs}/exps_overview/lr256_tgt45Kb.yaml',
     512: f'{first_order_model_configs}/exps_overview/lr512_tgt180Kb.yaml'
 }
 

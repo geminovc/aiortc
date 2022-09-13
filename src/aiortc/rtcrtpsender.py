@@ -261,7 +261,7 @@ class RTCRtpSender:
                         if self.__gcc_target_bitrate is not None:
                             self.__track._lr_size = self.get_lr_size_by_gcc(self.__gcc_target_bitrate)
 
-                    elif self.__encoder and hasattr(self.__encoder, "target_bitrate"):
+                    if self.__encoder and hasattr(self.__encoder, "target_bitrate"):
                         self.__encoder.target_bitrate = bitrate
             except ValueError:
                 pass
@@ -285,7 +285,7 @@ class RTCRtpSender:
                                      256: 75000,
                                      256: 105000,
                                      512: 180000,
-                                     512: 480000,
+                                     512: 420000,
                                      1024: 600000}
         bitrate = self.lr_size_bitrate_dict[lr_size]
         return bitrate
@@ -305,19 +305,27 @@ class RTCRtpSender:
                 self.__lr_encoders[lr_size] = get_encoder(codec)
 
             self.__encoder = self.__lr_encoders[lr_size]
-            target_bitrate = self.get_targte_bitrate_lr_size(lr_size) #self.__target_bitrate
+            if lr_size == 1024:
+                """ enable gcc's feedback to encoder if full-res"""
+                enable_gcc = True
+                target_bitrate = self.__gcc_target_bitrate
+            else:
+                enable_gcc = False
+                target_bitrate = self.get_targte_bitrate_lr_size(lr_size) #self.__target_bitrate
+
         else: # "video", "audio", "keypoints"
             lr_size = None
             if self.__encoder is None:
                 self.__encoder = get_encoder(codec)
             target_bitrate = self.__gcc_target_bitrate
+            enable_gcc = True
  
         force_keyframe = self.__force_keyframe
         quantizer = self.__quantizer
-        enable_gcc = self.__enable_gcc
         self.__force_keyframe = False
-        self.__log_debug("encoding frame with force keyframe %s at time %s", 
-                        force_keyframe, datetime.datetime.now())
+        self.__log_debug("encoding frame with force keyframe %s at time %s with quantizer %s \
+                target_bitrate %s enable_gcc %s, lr_size %s",
+                force_keyframe, datetime.datetime.now(), quantizer, target_bitrate, enable_gcc, lr_size)
         return await self.__loop.run_in_executor(
             None, self.__encoder.encode, frame, force_keyframe, quantizer, target_bitrate, enable_gcc
         ), lr_size

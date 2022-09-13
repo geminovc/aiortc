@@ -484,18 +484,18 @@ class MediaPlayer:
                         "MediaPlayer(%s) Put None in audio in player_worker",
                         container.name
                     )
-                    asyncio.run_coroutine_threadsafe(audio_track._queue.put((None, None)), loop)
+                    asyncio.run_coroutine_threadsafe(audio_track._queue.put((None, None, None, None)), loop)
                 if video_track:
                     logger.warning(
                         "MediaPlayer(%s) Put None in video and keypoints in player_worker",
                         container.name
                     )
-                    asyncio.run_coroutine_threadsafe(video_track._queue.put((None, None)), loop)
+                    asyncio.run_coroutine_threadsafe(video_track._queue.put((None, None, None, None)), loop)
                     if enable_prediction:
                         if prediction_type == 'keypoints':
-                            asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((None, None)), loop)
+                            asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((None, None, None, None)), loop)
                         else:
-                            asyncio.run_coroutine_threadsafe(lr_video_track._queue.put((None, None)), loop)
+                            asyncio.run_coroutine_threadsafe(lr_video_track._queue.put((None, None, None, None)), loop)
                 break
 
             # read up to 1 second ahead
@@ -909,7 +909,7 @@ class MediaRecorder:
                                         print("adding full-res to final video")
                                         predicted_target = lr_frame_array
                                 after_predict_time = time.perf_counter()
-                                self.__log_debug("Prediction time for received %s %s: %s at time %s for resolution ",
+                                self.__log_debug("Prediction time for received %s %s: %s at time %s for resolution %s ",
                                         track.kind, frame_index, str(after_predict_time - before_predict_time),
                                         after_predict_time, lr_size)
 

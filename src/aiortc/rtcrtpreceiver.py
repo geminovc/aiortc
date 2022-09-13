@@ -271,7 +271,7 @@ class RTCRtpReceiver:
             self.__jitter_buffer = JitterBuffer(capacity=128, is_video=True)
             self.__nack_generator = NackGenerator()
             self.__remote_bitrate_estimator = RemoteBitrateEstimator()
-            self.__stream_resolutions = [64, 128, 256, 512]
+            self.__stream_resolutions = [64, 128, 256, 512, 1024]
             self.__current_stream_resoluton = 256
         else:
             # for "video"

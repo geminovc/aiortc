@@ -42,7 +42,14 @@ logger = logging.getLogger(__name__)
 
 RTP_HISTORY_SIZE = 128
 RTT_ALPHA = 0.85
-
+BITRATE_PAYLOAD_DICT = {15000: 0,
+                        45000: 1,
+                        75000: 2,
+                        105000: 3,
+                        180000: 4,
+                        420000: 5,
+                        600000: 6}
+INV_BITRATE_PAYLOAD_DICT = {v: k for k, v in BITRATE_PAYLOAD_DICT.items()}
 
 class RTCRtpSender:
     """
@@ -279,16 +286,32 @@ class RTCRtpSender:
         return 1024
 
 
-    def get_targte_bitrate_lr_size(self, lr_size):
-        self.lr_size_bitrate_dict = {128: 15000,
-                                     256: 45000,
-                                     256: 75000,
-                                     256: 105000,
-                                     512: 180000,
-                                     512: 420000,
-                                     1024: 600000}
-        bitrate = self.lr_size_bitrate_dict[lr_size]
-        return bitrate
+    def get_targte_bitrate_lr_size(self, lr_size, gcc_bitrate):
+        #TODO: check these bounds
+        """ maps frame size to the bitrate it should be encoded as with
+            respecting gcc's bitrate as well
+        """
+        if lr_size == 128:
+            return 15000
+        elif lr_size == 256:
+            if gcc_bitrate is None:
+                return 45000
+            if gcc_bitrate < 60000:
+                return 45000
+            elif 60000 <= gcc_bitrate < 90000:
+                return 75000
+            else:
+                return 105000
+        elif lr_size == 512:
+            if gcc_bitrate is None:
+                return 180000
+            if gcc_bitrate < 300000:
+                return 180000
+            else:
+                return 420000
+        else:
+            # 1024
+            return 600000
 
 
     async def _next_encoded_frame(self, codec: RTCRtpCodecParameters):
@@ -309,12 +332,15 @@ class RTCRtpSender:
                 """ enable gcc's feedback to encoder if full-res"""
                 enable_gcc = True
                 target_bitrate = self.__gcc_target_bitrate
+                bitrate_code = BITRATE_PAYLOAD_DICT[600000]
             else:
                 enable_gcc = False
-                target_bitrate = self.get_targte_bitrate_lr_size(lr_size) #self.__target_bitrate
+                target_bitrate = self.get_targte_bitrate_lr_size(lr_size, self.__gcc_target_bitrate)
+                bitrate_code = BITRATE_PAYLOAD_DICT[target_bitrate]
 
         else: # "video", "audio", "keypoints"
             lr_size = None
+            bitrate_code = None
             if self.__encoder is None:
                 self.__encoder = get_encoder(codec)
             target_bitrate = self.__gcc_target_bitrate
@@ -328,7 +354,8 @@ class RTCRtpSender:
                 force_keyframe, datetime.datetime.now(), quantizer, target_bitrate, enable_gcc, lr_size)
         return await self.__loop.run_in_executor(
             None, self.__encoder.encode, frame, force_keyframe, quantizer, target_bitrate, enable_gcc
-        ), lr_size
+        ), lr_size, bitrate_code
+
 
     async def _retransmit(self, sequence_number: int) -> None:
         """
@@ -368,9 +395,9 @@ class RTCRtpSender:
                     continue
 
                 counter += 1
-                (payloads, timestamp), lr_size = await self._next_encoded_frame(codec)
-                self.__log_debug("Frame %s is encoded with resolution %s with len %s at time %s", 
-                                counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now())
+                (payloads, timestamp), lr_size, bitrate_code  = await self._next_encoded_frame(codec)
+                self.__log_debug("Frame %s is encoded with resolution %s with len %s at time %s with bitrate_code %s ", 
+                                counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now(), bitrate_code)
                 old_timestamp = timestamp
                 timestamp = uint32_add(timestamp_origin, timestamp)
                 if self.__kind == "lr_video" and lr_size is not None:
@@ -379,7 +406,8 @@ class RTCRtpSender:
                     """
                     # 2, 4, 32, 64, 128, 256, 512, 1024
                     resolution_payload = bytes([int(math.log(lr_size,2))])
-                    payloads= [resolution_payload] + payloads
+                    bitrate_payload = bytes([int(bitrate_code)])
+                    payloads= [resolution_payload] + [bitrate_payload] + payloads
                     #self.__log_debug("> payloads %s", payloads)
                 for i, payload in enumerate(payloads):
                     packet = RtpPacket(

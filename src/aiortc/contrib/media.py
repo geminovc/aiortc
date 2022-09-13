@@ -765,7 +765,7 @@ class MediaRecorder:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         while True:
             try:
-                frame = await track.recv()
+                frame, target_bitrate = await track.recv()
             except MediaStreamError:
                 logger.warning("Couldn't receive the %s track.", track.kind)
                 return
@@ -972,11 +972,11 @@ class RelayStreamTrack(MediaStreamTrack):
             raise MediaStreamError
 
         self._relay._start(self)
-        frame = await self._queue.get()
+        frame, target_bitrate = await self._queue.get()
         if frame is None:
             self.stop()
             raise MediaStreamError
-        return frame
+        return frame, target_bitrate
 
     def stop(self):
         super().stop()

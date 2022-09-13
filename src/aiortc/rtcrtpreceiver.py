@@ -44,6 +44,7 @@ from .stats import (
     RTCStatsReport,
 )
 from .utils import uint16_add, uint16_gt
+from .rtcrtpsender import INV_BITRATE_PAYLOAD_DICT
 
 logger = logging.getLogger(__name__)
 
@@ -56,9 +57,9 @@ def decoder_worker(loop, input_q, output_q):
         task = input_q.get()
         if task is None:
             # inform the track that is has ended
-            asyncio.run_coroutine_threadsafe(output_q.put(None), loop)
+            asyncio.run_coroutine_threadsafe(output_q.put((None, None)), loop)
             break
-        codec, encoded_frame = task
+        codec, encoded_frame, target_bitrate = task
 
         if codec.name != codec_name:
             decoder = get_decoder(codec)
@@ -71,7 +72,7 @@ def decoder_worker(loop, input_q, output_q):
 
         for frame in decoded_frames:
             # pass the decoded frame to the track
-            asyncio.run_coroutine_threadsafe(output_q.put(frame), loop)
+            asyncio.run_coroutine_threadsafe(output_q.put((frame, target_bitrate)), loop)
 
 
     if decoder is not None:
@@ -189,13 +190,13 @@ class RemoteStreamTrack(MediaStreamTrack):
         if self.readyState != "live":
             raise MediaStreamError
 
-        frame = await self._queue.get()
+        frame, target_bitrate = await self._queue.get()
         if frame is None:
             self.stop()
             logger.debug(f"RTCRtpReceiver(%s) received None frame", self.kind)
             raise MediaStreamError
         logger.debug(f"RTCRtpReceiver(%s) received the next frame", self.kind)
-        return frame
+        return frame, target_bitrate
 
 
 class TimestampMapper:
@@ -523,9 +524,9 @@ class RTCRtpReceiver:
         # parse codec-specific information
         try:
             if packet.payload:
-                if self.__kind == "lr_video" and packet.payload in [bytes([i]) for i in range(1, 11)]:
+                if self.__kind == "lr_video" and packet.payload in [bytes([i]) for i in range(0, 11)]:
                     packet._data = packet.payload  # type: ignore
-                    self.__log_debug("resolution in bytes %s", packet.payload)
+                    self.__log_debug("resolution or bitrate_code in bytes %s", packet.payload)
                 else:
                     packet._data = depayload(codec, packet.payload)
             else:
@@ -553,12 +554,14 @@ class RTCRtpReceiver:
                 """ parse the resolution from the payload for lr_video"""
                 data = encoded_frame.data
                 frame_resolution = 2 ** int(data[0])
+                target_bitrate = INV_BITRATE_PAYLOAD_DICT[int(data[1])]
                 self.__current_stream_resoluton = frame_resolution
-                encoded_frame.data = data[1:]
+                encoded_frame.data = data[2:]
             else:
                 frame_resolution = 1024
+                target_bitrate = None
             codec = self.__codecs.get((packet.payload_type, frame_resolution)) 
-            self.__decoder_queue.put((codec, encoded_frame))
+            self.__decoder_queue.put((codec, encoded_frame, target_bitrate))
             self.__log_debug("Put frame timestamp %s into decoder queue with resolution %s at time %s", 
                              encoded_frame.timestamp, frame_resolution, datetime.datetime.now())
 
@@ -640,7 +643,7 @@ class RTCRtpReceiver:
         Stop the decoder thread, which will in turn stop the track.
         """
         if self.__decoder_thread:
-            self.__decoder_queue.put(None)
+            self.__decoder_queue.put((None, None))
             self.__decoder_thread.join()
             self.__decoder_thread = None
 

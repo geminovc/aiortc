@@ -403,7 +403,8 @@ class RTCPeerConnection(AsyncIOEventEmitter):
             iceTransport = self.__sctp.transport.transport
             await iceTransport.addRemoteCandidate(candidate)
 
-    def addTrack(self, track: MediaStreamTrack, quantizer: int = 32, target_bitrate: int = 100000, enable_gcc: bool = False) -> RTCRtpSender:
+    def addTrack(self, track: MediaStreamTrack, quantizer: int = 32,
+            target_bitrate: int = 100000, enable_gcc: bool = False) -> RTCRtpSender:
         print("addTrack in here with", quantizer, target_bitrate, enable_gcc)
         """
         Add a :class:`MediaStreamTrack` to the set of media tracks which
@@ -427,7 +428,8 @@ class RTCPeerConnection(AsyncIOEventEmitter):
                     return transceiver.sender
 
         transceiver = self.__createTransceiver(
-            direction="sendrecv", kind=track.kind, sender_track=track, quantizer=quantizer, target_bitrate=target_bitrate, enable_gcc=enable_gcc
+            direction="sendrecv", kind=track.kind, sender_track=track, quantizer=quantizer,
+            target_bitrate=target_bitrate, enable_gcc=enable_gcc
         )
         return transceiver.sender
 

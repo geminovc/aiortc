@@ -14,9 +14,9 @@ from .base import Decoder, Encoder
 
 import os
 
-DEFAULT_BITRATE = int(os.environ.get('VPX_DEFAULT_BITRATE', 500000)) # 500 kbps
-MIN_BITRATE = int(os.environ.get('VPX_MIN_BITRATE', 50000)) # 50 kbps
-MAX_BITRATE = int(os.environ.get('VPX_MAX_BITRATE', 1500000)) # 15 mbps
+DEFAULT_BITRATE = int(os.environ.get('VPX_DEFAULT_BITRATE', 500000))
+MIN_BITRATE = int(os.environ.get('VPX_MIN_BITRATE', 50000))
+MAX_BITRATE = int(os.environ.get('VPX_MAX_BITRATE', 150000000))
 
 MAX_FRAME_RATE = 30
 PACKET_MAX = 1300
@@ -254,7 +254,10 @@ class Vp8Encoder(Encoder):
                                             (120000, 240000): 1000000,
                                             (240000, 360000): 1500000,
                                             (360000, 480000): 2500000,
-                                            (480000, 600000): 3000000}
+                                            (480000, 600000): 3000000,
+                                            (600000, 720000): 3500000,
+                                            (720000, 840000): 4000000,
+                                            (840000, 1100000): 4500000}
 
     def get_vpx_bitrate(self, target_bitrate):
         for low, high in self.vpx_bitrate_conversion_dict.keys():

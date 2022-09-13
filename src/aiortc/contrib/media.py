@@ -30,9 +30,9 @@ from .cached_models import checkpoint_zoo, config_paths
 """ config_path, checkpoint, and main_configs are mostly used for
     generator_type in ['vpx', 'bicubic', 'swinir-lte']
 """
-config_path = os.environ.get('CONFIG_PATH', 'None')
-checkpoint = os.environ.get('CHECKPOINT_PATH', 'None')
-person = os.environ.get('PERSON', 'kayleigh')
+config_path = '/video-conf/scratch/vibhaa_tardy/final_results/training_with_encoder/lr512_tgt180/needle_drop/lr512_tgt180Kb.yaml'#os.environ.get('CONFIG_PATH', 'None')
+checkpoint = '/video-conf/scratch/vibhaa_tardy/final_results/training_with_encoder/lr512_tgt180/needle_drop/00000029-checkpoint.pth.tar' #os.environ.get('CHECKPOINT_PATH', 'None')
+person = os.environ.get('PERSON', 'needle_drop')
 # main configs
 main_configs = get_main_config_params(config_path)
 frame_shape = main_configs['frame_shape']
@@ -252,7 +252,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         self._queue = asyncio.Queue()
         self._start = None
         self._fps_factor = fps_factor
-        self._lr_size = 256 # default lr_video resolution at the start
+        self._lr_size = 512 # default lr_video resolution at the start
 
     async def recv(self):
         if self.readyState != "live":

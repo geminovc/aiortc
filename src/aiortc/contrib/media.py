@@ -252,7 +252,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         self._queue = asyncio.Queue()
         self._start = None
         self._fps_factor = fps_factor
-        self._lr_size = 512 # default lr_video resolution at the start
+        self._lr_size = 128 # default lr_video resolution at the start, set it on gcc as well
 
     async def recv(self):
         if self.readyState != "live":

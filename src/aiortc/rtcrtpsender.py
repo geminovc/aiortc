@@ -275,10 +275,10 @@ class RTCRtpSender:
 
 
     def get_lr_size_by_gcc(self, bitrate):
+        # Please look at get_targte_bitrate_lr_size also
         self.gcc_bitrate_resolution_dict = {(0, 30000): 128,
-                                            (30000, 60000): 256,
-                                            (60000, 90000): 256,
-                                            (90000, 600000): 512,
+                                            (30000, 120000): 256,
+                                            (120000, 600000): 512,
                                             (600000, 3000000): 1024}
         for low, high in self.gcc_bitrate_resolution_dict.keys():
             if low <= bitrate < high:
@@ -288,8 +288,8 @@ class RTCRtpSender:
 
     def get_targte_bitrate_lr_size(self, lr_size, gcc_bitrate):
         #TODO: check these bounds
-        """ maps frame size to the bitrate it should be encoded as with
-            respecting gcc's bitrate as well
+        """ maps frame size to the bitrate it should be encoded  with
+            respect to gcc's bitrate as well
         """
         if lr_size == 128:
             return 15000
@@ -400,15 +400,15 @@ class RTCRtpSender:
                                 counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now(), bitrate_code)
                 old_timestamp = timestamp
                 timestamp = uint32_add(timestamp_origin, timestamp)
-                if self.__kind == "lr_video" and lr_size is not None:
+                if self.__kind == "lr_video" and lr_size is not None and bitrate_code is not None:
                     """ Adding the resolution of frame (lr_size) as one byte
                         to the payload. resolution = 2 ** (int(resolution_payload))
+                        Adding bitrate_code as one byte to the payload
                     """
-                    # 2, 4, 32, 64, 128, 256, 512, 1024
                     resolution_payload = bytes([int(math.log(lr_size,2))])
                     bitrate_payload = bytes([int(bitrate_code)])
                     payloads= [resolution_payload] + [bitrate_payload] + payloads
-                    #self.__log_debug("> payloads %s", payloads)
+
                 for i, payload in enumerate(payloads):
                     packet = RtpPacket(
                         payload_type=codec.payloadType,

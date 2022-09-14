@@ -260,9 +260,10 @@ class Vp8Encoder(Encoder):
                                             (840000, 1100000): 4500000}
 
     def get_vpx_bitrate(self, target_bitrate):
-        for low, high in self.vpx_bitrate_conversion_dict.keys():
-            if low <= target_bitrate and target_bitrate < high:
-                return  self.vpx_bitrate_conversion_dict[(low, high)]
+        if target_bitrate is not None:
+            for low, high in self.vpx_bitrate_conversion_dict.keys():
+                if low <= target_bitrate and target_bitrate < high:
+                    return  self.vpx_bitrate_conversion_dict[(low, high)]
         return None
 
     def __del__(self) -> None:

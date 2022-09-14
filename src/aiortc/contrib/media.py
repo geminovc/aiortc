@@ -902,6 +902,12 @@ class MediaRecorder:
                                                     model.predict_with_lr_video, lr_frame_array)
 
                                         else:
+                                            """ guard against errors in transport layer"""
+                                            if (lr_size, target_bitrate) not in model_zoo.keys():
+                                                for k1, k2 in model_zoo.keys():
+                                                    if k1 == lr_size:
+                                                        target_bitrate = k2
+
                                             self.__log_debug("Using the model with resolution %s from the zoo", lr_size)
                                             predicted_target = await loop.run_in_executor(pool, \
                                                     model_zoo[(lr_size, target_bitrate)].predict_with_lr_video, lr_frame_array)

@@ -30,9 +30,12 @@ from .cached_models import checkpoint_zoo, config_paths
 """ config_path, checkpoint, and main_configs are mostly used for
     generator_type in ['vpx', 'bicubic', 'swinir-lte']
 """
-config_path = '/video-conf/scratch/vibhaa_tardy/final_results/training_with_encoder/lr512_tgt180/needle_drop/lr512_tgt180Kb.yaml'#os.environ.get('CONFIG_PATH', 'None')
-checkpoint = '/video-conf/scratch/vibhaa_tardy/final_results/training_with_encoder/lr512_tgt180/needle_drop/00000029-checkpoint.pth.tar' #os.environ.get('CHECKPOINT_PATH', 'None')
+default_path = '/video-conf/scratch/vibhaa_tardy/final_results/training_with_encoder/lr512_tgt180Kb'
 person = os.environ.get('PERSON', 'needle_drop')
+config_path = os.environ.get('CONFIG_PATH', f'{default_path}/{person}/lr512_tgt180Kb.yaml')
+checkpoint = os.environ.get( 'CHECKPOINT_PATH', f'{default_path}/{person}/00000029-checkpoint.pth.tar')
+print(config_path)
+print(checkpoint)
 # main configs
 main_configs = get_main_config_params(config_path)
 frame_shape = main_configs['frame_shape']
@@ -90,8 +93,8 @@ if generator_type not in ['vpx', 'bicubic']:
 save_keypoints_to_file = False
 save_lr_video_npy = False
 save_predicted_frames = False
-save_sent_frames = True
-save_received_frames = True
+save_sent_frames = False
+save_received_frames = False
 logger = logging.getLogger(__name__)
 
 
@@ -254,7 +257,7 @@ class PlayerStreamTrack(MediaStreamTrack):
         self._queue = asyncio.Queue()
         self._start = None
         self._fps_factor = fps_factor
-        self._lr_size = 256 # default lr_video resolution at the start, set it on receiver.py as well
+        self._lr_size = 1024 #512 # default lr_video resolution at the start, set it on receiver.py as well
 
     async def recv(self):
         if self.readyState != "live":

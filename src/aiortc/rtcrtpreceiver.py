@@ -272,7 +272,7 @@ class RTCRtpReceiver:
             self.__jitter_buffer = JitterBuffer(capacity=128, is_video=True)
             self.__nack_generator = NackGenerator()
             self.__remote_bitrate_estimator = RemoteBitrateEstimator()
-            self.__stream_resolutions = [64, 128, 256, 512, 1024]
+            self.__stream_resolutions = [128, 256, 512, 1024]
             self.__current_stream_resoluton = 256
         else:
             # for "video"
@@ -562,8 +562,8 @@ class RTCRtpReceiver:
                 target_bitrate = None
             codec = self.__codecs.get((packet.payload_type, frame_resolution)) 
             self.__decoder_queue.put((codec, encoded_frame, target_bitrate))
-            self.__log_debug("Put frame timestamp %s into decoder queue with resolution %s at time %s", 
-                             encoded_frame.timestamp, frame_resolution, datetime.datetime.now())
+            self.__log_debug("Put frame timestamp %s into decoder queue with resolution %s and target_bitrate %s at time %s", 
+                             encoded_frame.timestamp, frame_resolution, target_bitrate, datetime.datetime.now())
 
     async def _run_rtcp(self) -> None:
         self.__log_debug("- RTCP started")

@@ -12,4 +12,4 @@ for setting in settings:
     lr_size, bitrate = setting
     config_paths[(lr_size, int(1000 * bitrate))] = f'{cfg_base}/exps_overview/lr{lr_size}_tgt{bitrate}Kb.yaml'
     for person in ['needle_drop']:
-        checkpoint_zoo[person][(lr_size, int(1000 * bitrate))] = f'{ckp_base}/lr{lr_size}_tgt{bitrate}/{person}/00000029-checkpoint.pth.tar'
+        checkpoint_zoo[person][(lr_size, int(1000 * bitrate))] = f'{ckp_base}/lr{lr_size}_tgt{bitrate}Kb/{person}/00000029-checkpoint.pth.tar'

@@ -108,6 +108,7 @@ class RTCRtpSender:
         self.__octet_count = 0
         self.__packet_count = 0
         self.__rtt = None
+        self.__frame_count = 0
 
     @property
     def kind(self):
@@ -345,13 +346,15 @@ class RTCRtpSender:
                 self.__encoder = get_encoder(codec)
             target_bitrate = self.__gcc_target_bitrate
             enable_gcc = True
- 
+            quantizer = self.__quantizer
+
+        target_bitrate = self.__gcc_target_bitrate
         force_keyframe = self.__force_keyframe
-        quantizer = self.__quantizer
         self.__force_keyframe = False
         self.__log_debug("encoding frame with force keyframe %s at time %s with quantizer %s \
-                target_bitrate %s enable_gcc %s, lr_size %s",
-                force_keyframe, datetime.datetime.now(), quantizer, target_bitrate, enable_gcc, lr_size)
+                target_bitrate %s enable_gcc %s, lr_size %s, bitrate_code %s",
+                force_keyframe, datetime.datetime.now(), quantizer, target_bitrate,
+                enable_gcc, lr_size, bitrate_code)
         return await self.__loop.run_in_executor(
             None, self.__encoder.encode, frame, force_keyframe, quantizer, target_bitrate, enable_gcc
         ), lr_size, bitrate_code

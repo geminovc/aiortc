@@ -37,6 +37,11 @@ from .stats import (
 )
 from .utils import random16, random32, uint16_add, uint32_add
 import math
+import numpy as np
+from skimage import img_as_float32
+import torch.nn.functional as F
+import torch
+import av
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,57 @@ BITRATE_PAYLOAD_DICT = {15000: 0,
                         420000: 5,
                         600000: 6}
 INV_BITRATE_PAYLOAD_DICT = {v: k for k, v in BITRATE_PAYLOAD_DICT.items()}
+BITRATE_ESTIMATION = "perfect" #"gcc"
+NUM_ROWS = 10
+NUMBER_OF_BITS = 16
+
+def frame_to_tensor(frame, device):
+    array = np.expand_dims(frame, 0).transpose(0, 3, 1, 2)
+    array = torch.from_numpy(array)
+    return array.float().to(device)
+
+
+def resize_tensor_to_array(input_tensor, output_size, device, mode='nearest'):
+    """ resizes a float tensor of range 0.0-1.0 to an int numpy array
+        of output_size
+    """
+    output_array = F.interpolate(input_tensor, output_size, mode=mode).data.cpu().numpy()
+    output_array = np.transpose(output_array, [0, 2, 3, 1])[0]
+    output_array *= 255
+    output_array = output_array.astype(np.uint8)
+    return output_array
+
+
+def stamp_frame(frame, frame_index, frame_pts, frame_time_base):
+    """ stamp frame with barcode for frame index before transmission
+    """
+    frame_array = frame.to_rgb().to_ndarray()
+    stamped_frame = np.zeros((frame_array.shape[0] + NUM_ROWS,
+                            frame_array.shape[1], frame_array.shape[2]))
+    k = frame_array.shape[1] // NUMBER_OF_BITS
+    stamped_frame[:-NUM_ROWS, :, :] = frame_array
+    id_str = f'{frame_index+1:0{NUMBER_OF_BITS}b}'
+
+    for i in range(len(id_str)):
+        if id_str[i] == '0':
+            for j in range(k):
+                for s in range(NUM_ROWS):
+                    stamped_frame[-s-1, i * k + j, 0] = 0
+                    stamped_frame[-s-1, i * k + j, 1] = 0
+                    stamped_frame[-s-1, i * k + j, 2] = 0
+        elif id_str[i] == '1':
+            for j in range(k):
+                for s in range(NUM_ROWS):
+                    stamped_frame[-s-1, i * k + j, 0] = 255
+                    stamped_frame[-s-1, i * k + j, 1] = 255
+                    stamped_frame[-s-1, i * k + j, 2] = 255
+
+    stamped_frame = np.uint8(stamped_frame)
+    final_frame = av.VideoFrame.from_ndarray(stamped_frame)
+    final_frame.pts = frame_pts
+    final_frame.time_base = frame_time_base
+    return final_frame
+
 
 class RTCRtpSender:
     """
@@ -109,6 +165,7 @@ class RTCRtpSender:
         self.__packet_count = 0
         self.__rtt = None
         self.__frame_count = 0
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     @property
     def kind(self):
@@ -261,55 +318,36 @@ class RTCRtpSender:
             try:
                 bitrate, ssrcs = unpack_remb_fci(packet.fci)
                 if self._ssrc in ssrcs:
-                    self.__log_debug(
-                        "- receiver estimated maximum bitrate %d bps at time %s", bitrate, datetime.datetime.now()
-                    )
-                    self.__gcc_target_bitrate = bitrate
-                    if self.__kind == 'lr_video':
-                        if self.__gcc_target_bitrate is not None:
-                            self.__track._lr_size = self.get_lr_size_by_gcc(self.__gcc_target_bitrate)
-
-                    if self.__encoder and hasattr(self.__encoder, "target_bitrate"):
-                        self.__encoder.target_bitrate = bitrate
+                    if BITRATE_ESTIMATION == 'gcc':
+                        self.__log_debug(
+                            "- receiver estimated maximum bitrate %d bps at time %s", bitrate, datetime.datetime.now()
+                        )
+                        self.__gcc_target_bitrate = bitrate
             except ValueError:
                 pass
 
 
-    def get_lr_size_by_gcc(self, bitrate):
-        # Please look at get_targte_bitrate_lr_size also
+    def get_lr_size_by_bitrate(self, bitrate):
         self.gcc_bitrate_resolution_dict = {(0, 30000): 128,
-                                            (30000, 120000): 256,
-                                            (120000, 600000): 512,
-                                            (600000, 3000000): 1024}
+                                            (30000, 180000): 256,
+                                            (180000, 550000): 512,
+                                            (550000, 3000000): 1024}
         for low, high in self.gcc_bitrate_resolution_dict.keys():
             if low <= bitrate < high:
                 return self.gcc_bitrate_resolution_dict[(low, high)]
         return 1024
 
 
-    def get_targte_bitrate_lr_size(self, lr_size, gcc_bitrate):
-        #TODO: check these bounds
+    def get_model_bitrate_by_lr_size(self, lr_size, gcc_bitrate):
         """ maps frame size to the bitrate it should be encoded  with
             respect to gcc's bitrate as well
         """
         if lr_size == 128:
             return 15000
         elif lr_size == 256:
-            if gcc_bitrate is None:
-                return 45000
-            if gcc_bitrate < 60000:
-                return 45000
-            elif 60000 <= gcc_bitrate < 90000:
-                return 75000
-            else:
-                return 105000
+            return 45000
         elif lr_size == 512:
-            if gcc_bitrate is None:
-                return 180000
-            if gcc_bitrate < 300000:
-                return 180000
-            else:
-                return 420000
+            return 180000
         else:
             # 1024
             return 600000
@@ -317,11 +355,36 @@ class RTCRtpSender:
 
     async def _next_encoded_frame(self, codec: RTCRtpCodecParameters):
         # get frame
-        frame = await self.__track.recv()
+        frame, frame_index, frame_pts, frame_time_base = await self.__track.recv()
 
+        # harcode the bitrate
+        self.__frame_count += 1
+        hardcoded_bitrate = min(max(650000 - 55 * self.__frame_count, 50000) + max(0, -742500 + 55 * self.__frame_count), 550000)
+
+        if BITRATE_ESTIMATION == 'perfect':
+            target_bitrate = hardcoded_bitrate
+            self.__log_debug(
+                     "- receiver estimated maximum bitrate %d bps at time %s", hardcoded_bitrate,
+                     datetime.datetime.now())
+        else:
+            target_bitrate = self.__gcc_target_bitrate
+
+        lr_size = self.get_lr_size_by_bitrate(target_bitrate)
+        self.__track._lr_size = lr_size
+
+        # check network status before encoding
+        # resize the frame down if the network condition is worse
+        if lr_size != frame.width and self.__kind == "lr_video":
+            frame_array = frame.to_rgb().to_ndarray()
+            frame_tensor = frame_to_tensor(img_as_float32(frame_array), self.device)
+            lr_frame_array = resize_tensor_to_array(frame_tensor, lr_size , self.device)
+            frame = av.VideoFrame.from_ndarray(lr_frame_array)
+            frame.pts = frame_pts
+            frame.time_base = frame_time_base
+
+        frame = stamp_frame(frame, frame_index, frame_pts, frame_time_base)
         # get the correct encoder
         if self.__kind == "lr_video":
-            lr_size = frame.width
             if lr_size not in self.__lr_encoders.keys():
                 self.__lr_encoders[lr_size] = None
 
@@ -330,25 +393,25 @@ class RTCRtpSender:
 
             self.__encoder = self.__lr_encoders[lr_size]
             if lr_size == 1024:
-                """ enable gcc's feedback to encoder if full-res"""
                 enable_gcc = True
-                target_bitrate = self.__gcc_target_bitrate
                 bitrate_code = BITRATE_PAYLOAD_DICT[600000]
+                quantizer = 63 #TODO
             else:
-                enable_gcc = False
-                target_bitrate = self.get_targte_bitrate_lr_size(lr_size, self.__gcc_target_bitrate)
-                bitrate_code = BITRATE_PAYLOAD_DICT[target_bitrate]
+                enable_gcc = True
+                bitrate_code = BITRATE_PAYLOAD_DICT[self.get_model_bitrate_by_lr_size(lr_size, target_bitrate)]
+                quantizer = -1
 
         else: # "video", "audio", "keypoints"
             lr_size = None
             bitrate_code = None
             if self.__encoder is None:
                 self.__encoder = get_encoder(codec)
-            target_bitrate = self.__gcc_target_bitrate
             enable_gcc = True
             quantizer = self.__quantizer
 
-        target_bitrate = self.__gcc_target_bitrate
+        if self.__encoder and hasattr(self.__encoder, "target_bitrate"):
+            self.__encoder.target_bitrate = target_bitrate
+
         force_keyframe = self.__force_keyframe
         self.__force_keyframe = False
         self.__log_debug("encoding frame with force keyframe %s at time %s with quantizer %s \
@@ -356,7 +419,7 @@ class RTCRtpSender:
                 force_keyframe, datetime.datetime.now(), quantizer, target_bitrate,
                 enable_gcc, lr_size, bitrate_code)
         return await self.__loop.run_in_executor(
-            None, self.__encoder.encode, frame, force_keyframe, quantizer, target_bitrate, enable_gcc
+            None, self.__encoder.encode, frame, force_keyframe, quantizer, target_bitrate, True
         ), lr_size, bitrate_code
 
 

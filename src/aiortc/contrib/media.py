@@ -224,14 +224,14 @@ def place_frame_in_video_queue(frame, frame_index, loop, video_track, container)
     """ place the attached frame in the video track queue after stamping it 
     """
     frame_time = frame.time
-    frame = stamp_frame(frame, frame_index, frame.pts, frame.time_base)
+    #frame = stamp_frame(frame, frame_index, frame.pts, frame.time_base)
     
     logger.warning(
         "MediaPlayer(%s) Put video frame %s in the queue: %s",
         container.name, str(frame_index), str(frame)
     )
     asyncio.run_coroutine_threadsafe(video_track._queue.put((frame, frame_time, \
-                                     frame_index, frame.pts)), loop)
+                                     frame_index, frame.pts, frame.time_base)), loop)
 
 
 def requires_updated_reference(keypoints, frame_index, original_frame, lr_frame_array=None,
@@ -264,7 +264,7 @@ class PlayerStreamTrack(MediaStreamTrack):
             raise MediaStreamError
 
         self._player._start(self)
-        frame, frame_time, frame_index, frame_pts = await self._queue.get()
+        frame, frame_time, frame_index, frame_pts, frame_time_base = await self._queue.get()
         if frame is None:
             self.__log_debug("Received frame from queue is None %s", self.kind)
             self.stop()
@@ -324,9 +324,9 @@ class PlayerStreamTrack(MediaStreamTrack):
                 )
 
             if keypoints_frame is not None:
-                return keypoints_frame
+                return keypoints_frame, frame_index, frame_pts, frame_time_base
         else:
-            return frame
+            return frame, frame_index, frame_pts, frame_time_base
 
     def stop(self):
         super().stop()
@@ -528,7 +528,7 @@ class MediaPlayer:
                     if frame:
                         frame_time = frame.time
                         asyncio.run_coroutine_threadsafe(
-                            audio_track._queue.put((frame, frame_time, frame.index, frame.pts)), loop
+                            audio_track._queue.put((frame, frame_time, frame.index, frame.pts, frame.time_base)), loop
                         )
                     else:
                         break
@@ -563,28 +563,28 @@ class MediaPlayer:
                     )
 
                     if prediction_type != "keypoints":
-                        logger.warning("MediaPlayer(%s) frame size %s", container.name,
-                                lr_video_track._lr_size)
-                        frame_tensor = frame_to_tensor(img_as_float32(frame_array), device)
-                        if generator_type != 'swinir-lte':
-                            if lr_video_track._lr_size < 1024:
-                                lr_frame_array = resize_tensor_to_array(frame_tensor,
-                                                    lr_video_track._lr_size , device)
-                            else:
-                                # send the full-res frame
-                                lr_frame_array = frame_array 
-                        else:
-                            lr_frame_array = resize_tensor_to_array(frame_tensor, lr_shape , device)
+                        #logger.warning("MediaPlayer(%s) frame size %s", container.name,
+                        #        lr_video_track._lr_size)
+                        #frame_tensor = frame_to_tensor(img_as_float32(frame_array), device)
+                        #if generator_type != 'swinir-lte':
+                        #    if lr_video_track._lr_size < 1024:
+                        #        lr_frame_array = resize_tensor_to_array(frame_tensor,
+                        #                            lr_video_track._lr_size , device)
+                        #    else:
+                        #        # send the full-res frame
+                        #        lr_frame_array = frame_array 
+                        #else:
+                        #    lr_frame_array = resize_tensor_to_array(frame_tensor, lr_shape , device)
 
-                        lr_frame = av.VideoFrame.from_ndarray(lr_frame_array)
-                        lr_frame.pts = frame.pts
-                        lr_frame.time_base = frame.time_base
+                        #lr_frame = av.VideoFrame.from_ndarray(lr_frame_array)
+                        #lr_frame.pts = frame.pts
+                        #lr_frame.time_base = frame.time_base
                         """
                         We can not re-write the index of an av.VideoFrame and it defaults to 0.
                         We should use frame.index as lr_frame.index.
                         """
 
-                        place_frame_in_video_queue(lr_frame, frame.index, loop, lr_video_track, container)
+                        place_frame_in_video_queue(frame, frame.index, loop, lr_video_track, container)
                         if save_lr_video_npy and save_dir is not None:
                             np.save(os.path.join(save_dir,
                                     'sender_lr_frame_%05d.npy' % frame.index),
@@ -693,6 +693,7 @@ class MediaRecorder:
         self.__reference_update_freq = reference_update_freq
         self.__output_fps = output_fps
         self.__display_option = "synthetic"
+        self.__reference_received = False
         '''
         __display_option could be:
             1. "real": original target-res video
@@ -863,6 +864,8 @@ class MediaRecorder:
                             received_keypoints = await self.__keypoints_queue.get()
                             frame_index = received_keypoints['frame_index']
                         elif track.kind == "lr_video":
+                            if self.__reference_frames_queue.qsize() < 1 and not self.__reference_received:
+                                continue
                             lr_frame, lr_frame_array, frame_index = await self.__lr_video_queue.get()
                         if self.__display_option == "synthetic":
                             # update reference if need be
@@ -870,6 +873,7 @@ class MediaRecorder:
                             if frame_index % self.__reference_update_freq == 0 and \
                                     generator_type not in ['bicubic', 'swinir-lte']:
                                 source_frame_array, source_keypoints_zoo, source_frame_index = await self.__reference_frames_queue.get()
+                                self.__reference_received = True
                                 time_before_update = time.perf_counter()
                                 for lr_config in low_res_configs:
                                     model_zoo[lr_config].update_source(source_frame_index,
@@ -894,7 +898,7 @@ class MediaRecorder:
                                             model_zoo[('no_lr_video', 0)].predict, received_keypoints)
                                 elif track.kind == "lr_video":
                                     lr_size = lr_frame_array.shape[1]
-                                    print(lr_size, target_bitrate, 'in media')
+                                    #print(lr_size, target_bitrate, 'in media')
                                     if lr_size < 1024:
                                         if generator_type == "bicubic":
                                             predicted_target = lr_frame.reformat(width=frame_shape[0], height=frame_shape[0],\
@@ -916,7 +920,6 @@ class MediaRecorder:
                                                     model_zoo[(lr_size, target_bitrate)].predict_with_lr_video, lr_frame_array)
                                     else:
                                         # full-res frame has been received
-                                        print("adding full-res to final video")
                                         predicted_target = lr_frame_array
                                 after_predict_time = time.perf_counter()
                                 self.__log_debug("Prediction time for received %s %s: %s at time %s for resolution %s target_bitrate %s ",

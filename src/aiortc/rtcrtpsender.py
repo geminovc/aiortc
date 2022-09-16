@@ -139,7 +139,7 @@ class RTCRtpSender:
         self.__force_keyframe = False
         self.__quantizer = quantizer
         self.__target_bitrate = target_bitrate
-        self.__gcc_target_bitrate = None
+        self.__gcc_target_bitrate = 500000
         self.__enable_gcc = enable_gcc
         self.__loop = asyncio.get_event_loop()
         self.__mid: Optional[str] = None
@@ -395,7 +395,7 @@ class RTCRtpSender:
             if lr_size == 1024:
                 enable_gcc = True
                 bitrate_code = BITRATE_PAYLOAD_DICT[600000]
-                quantizer = 63 #TODO
+                quantizer = -1 #TODO
             else:
                 enable_gcc = True
                 bitrate_code = BITRATE_PAYLOAD_DICT[self.get_model_bitrate_by_lr_size(lr_size, target_bitrate)]

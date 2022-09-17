@@ -70,7 +70,7 @@ class FlagVideoStreamTrack(VideoStreamTrack):
         frame.pts = pts
         frame.time_base = time_base
         self.counter += 1
-        return frame
+        return frame, frame.index, frame.pts, frame.time_base
 
     def _create_rectangle(self, width, height, color):
         data_bgr = numpy.zeros((height, width, 3), numpy.uint8)

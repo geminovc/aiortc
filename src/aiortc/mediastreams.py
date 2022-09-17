@@ -58,7 +58,7 @@ class MediaStreamTrack(AsyncIOEventEmitter, metaclass=ABCMeta):
         return "ended" if self.__ended else "live"
 
     @abstractmethod
-    async def recv(self) -> Frame:
+    async def recv(self):
         """
         Receive the next :class:`~av.audio.frame.AudioFrame` or :class:`~av.video.frame.VideoFrame`.
         """
@@ -136,7 +136,7 @@ class VideoStreamTrack(MediaStreamTrack):
             self._timestamp = 0
         return self._timestamp, VIDEO_TIME_BASE
 
-    async def recv(self) -> Frame:
+    async def recv(self):
         """
         Receive the next :class:`~av.video.frame.VideoFrame`.
 
@@ -150,7 +150,7 @@ class VideoStreamTrack(MediaStreamTrack):
             p.update(bytes(p.buffer_size))
         frame.pts = pts
         frame.time_base = time_base
-        return frame
+        return frame, frame.index, frame.pts, frame.time_base
 
 class KeypointsStreamTrack(VideoStreamTrack):
     """

@@ -174,6 +174,10 @@ def destamp_frame(frame):
 
     destamped_frame = np.uint8(destamped_frame)
     final_frame = av.VideoFrame.from_ndarray(destamped_frame)
+    logger.warning(
+        "Detamping frame %s with resulting frame_index %s in the receiver",
+         str(frame), str(frame_id)
+    )
     return final_frame, frame_id
 
 
@@ -336,8 +340,10 @@ class PlayerStreamTrack(MediaStreamTrack):
             self._player = None
 
     def __log_debug(self, msg: str, *args) -> None:
-        logger.debug(f"PlayerStreamTrack(%s) {msg}", self.__container.name, *args)
-
+        try:
+            logger.debug(f"PlayerStreamTrack(%s) {msg}", self.__container.name, *args)
+        except:
+            pass
 
 class MediaPlayer:
     """
@@ -488,18 +494,18 @@ class MediaPlayer:
                         "MediaPlayer(%s) Put None in audio in player_worker",
                         container.name
                     )
-                    asyncio.run_coroutine_threadsafe(audio_track._queue.put((None, None, None, None)), loop)
+                    asyncio.run_coroutine_threadsafe(audio_track._queue.put((None, None, None, None, None)), loop)
                 if video_track:
                     logger.warning(
                         "MediaPlayer(%s) Put None in video and keypoints in player_worker",
                         container.name
                     )
-                    asyncio.run_coroutine_threadsafe(video_track._queue.put((None, None, None, None)), loop)
+                    asyncio.run_coroutine_threadsafe(video_track._queue.put((None, None, None, None, None)), loop)
                     if enable_prediction:
                         if prediction_type == 'keypoints':
-                            asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((None, None, None, None)), loop)
+                            asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((None, None, None, None, None)), loop)
                         else:
-                            asyncio.run_coroutine_threadsafe(lr_video_track._queue.put((None, None, None, None)), loop)
+                            asyncio.run_coroutine_threadsafe(lr_video_track._queue.put((None, None, None, None, None)), loop)
                 break
 
             # read up to 1 second ahead
@@ -592,7 +598,7 @@ class MediaPlayer:
 
                     else:
                         asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((frame_array, frame.time, \
-                                frame.index, frame.pts)), loop)
+                                frame.index, frame.pts, frame.time_base)), loop)
 
                 # Only add video frame is this is meant to be used as a source \
                 # frame or if prediction is disabled
@@ -771,6 +777,8 @@ class MediaRecorder:
         while True:
             try:
                 frame, target_bitrate = await track.recv()
+                self.__log_debug("Received from track frame %s and target_bitrate %s",
+                        frame, target_bitrate)
             except MediaStreamError:
                 logger.warning("Couldn't receive the %s track.", track.kind)
                 return

@@ -183,7 +183,7 @@ class RemoteStreamTrack(MediaStreamTrack):
             self._id = id
         self._queue: asyncio.Queue = asyncio.Queue()
 
-    async def recv(self) -> Frame:
+    async def recv(self):
         """
         Receive the next frame.
         """
@@ -191,11 +191,15 @@ class RemoteStreamTrack(MediaStreamTrack):
             raise MediaStreamError
 
         frame, target_bitrate = await self._queue.get()
+
+        logger.debug(f"RTCRtpReceiver(%s) received frame %s and target_bitrate %s in RemoteStreamTrack",
+                self.kind, frame, target_bitrate)
+
         if frame is None:
             self.stop()
-            logger.debug(f"RTCRtpReceiver(%s) received None frame", self.kind)
+            logger.debug(f"RTCRtpReceiver(%s) received None frame in RemoteStreamTrack", self.kind)
             raise MediaStreamError
-        logger.debug(f"RTCRtpReceiver(%s) received the next frame", self.kind)
+        logger.debug(f"RTCRtpReceiver(%s) received the next frame in RemoteStreamTrack", self.kind)
         return frame, target_bitrate
 
 
@@ -377,6 +381,10 @@ class RTCRtpReceiver:
             for codec in parameters.codecs:
                 for resolution in self.__stream_resolutions:
                     self.__codecs[(codec.payloadType, resolution)] = codec
+                    if not is_rtx(codec):
+                        print("not is_rtx", codec.name, codec.payloadType, resolution)
+                    else:
+                        print("is_rtx", codec.name, codec.payloadType, resolution)
  
             for encoding in parameters.encodings:
                 if encoding.rtx:
@@ -506,9 +514,12 @@ class RTCRtpReceiver:
             if original_ssrc is None:
                 self.__log_debug("x RTX packet from unknown SSRC %d", packet.ssrc)
                 return
-            #TODO: change res to res7 to make the len > 2
-            #if len(packet.payload) < 2:
-            #    return
+
+            print("received retransmission")
+            self.__log_debug("retransmission packet hell ", packet.payload)
+
+            if len(packet.payload) < 2:
+                return
 
             codec = self.__codecs[(codec.parameters["apt"], self.__current_stream_resoluton)]
             packet = unwrap_rtx(
@@ -618,6 +629,7 @@ class RTCRtpReceiver:
         """
         Send an RTCP packet to report missing RTP packets.
         """
+        self.__log_debug("> NACK %s ", lost)
         if self.__rtcp_ssrc is not None:
             packet = RtcpRtpfbPacket(
                 fmt=RTCP_RTPFB_NACK, ssrc=self.__rtcp_ssrc, media_ssrc=media_ssrc
@@ -643,7 +655,7 @@ class RTCRtpReceiver:
         Stop the decoder thread, which will in turn stop the track.
         """
         if self.__decoder_thread:
-            self.__decoder_queue.put((None, None))
+            self.__decoder_queue.put((None, None, None))
             self.__decoder_thread.join()
             self.__decoder_thread = None
 

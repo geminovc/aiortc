@@ -55,7 +55,7 @@ BITRATE_PAYLOAD_DICT = {15000: 0,
                         420000: 5,
                         600000: 6}
 INV_BITRATE_PAYLOAD_DICT = {v: k for k, v in BITRATE_PAYLOAD_DICT.items()}
-BITRATE_ESTIMATION = "perfect" #"gcc"
+BITRATE_ESTIMATION = "perfect"
 NUM_ROWS = 10
 NUMBER_OF_BITS = 16
 
@@ -104,7 +104,35 @@ def stamp_frame(frame, frame_index, frame_pts, frame_time_base):
     final_frame = av.VideoFrame.from_ndarray(stamped_frame)
     final_frame.pts = frame_pts
     final_frame.time_base = frame_time_base
+    logger.debug(f"RTCRtpSender stamping frame %s with frame_index %s", frame, frame_index)
     return final_frame
+
+
+def destamp_frame(frame):
+    """ retrieve frame index and original frame from barcoded frame
+    """
+    frame_array = frame.to_rgb().to_ndarray()
+    k = frame_array.shape[1] // NUMBER_OF_BITS
+    destamped_frame = frame_array[:-NUM_ROWS]
+
+    frame_id = frame_array[-NUM_ROWS:, :, :]
+    frame_id = frame_id.mean(0)
+    frame_id = frame_id[frame_array.shape[1] - k*NUMBER_OF_BITS:, :]
+
+    frame_id = np.reshape(frame_id, [NUMBER_OF_BITS, k, 3])
+    frame_id = frame_id.mean(axis=(1,2))
+
+    frame_id = (frame_id > (frame_id.max() + frame_id.min()) / 2 * 1.2 ).astype(int)
+    frame_id = ((2 ** (NUMBER_OF_BITS - 1 - np.arange(NUMBER_OF_BITS))) * frame_id).sum()
+    frame_id = frame_id - 1
+
+    destamped_frame = np.uint8(destamped_frame)
+    final_frame = av.VideoFrame.from_ndarray(destamped_frame)
+    logger.warning(
+        "Detamping the frame %s with resulting frame_index %s in the sender",
+         str(frame), str(frame_id)
+    )
+    return final_frame, frame_id
 
 
 class RTCRtpSender:
@@ -329,8 +357,8 @@ class RTCRtpSender:
 
     def get_lr_size_by_bitrate(self, bitrate):
         self.gcc_bitrate_resolution_dict = {(0, 30000): 128,
-                                            (30000, 180000): 256,
-                                            (180000, 550000): 512,
+                                            (30000, 110000): 256,
+                                            (110000, 550000): 512,
                                             (550000, 3000000): 1024}
         for low, high in self.gcc_bitrate_resolution_dict.keys():
             if low <= bitrate < high:
@@ -356,10 +384,14 @@ class RTCRtpSender:
     async def _next_encoded_frame(self, codec: RTCRtpCodecParameters):
         # get frame
         frame, frame_index, frame_pts, frame_time_base = await self.__track.recv()
-
+        self.__log_debug("frame width %s height %s in _next_encoded_frame", frame.width, frame.height)
         # harcode the bitrate
         self.__frame_count += 1
-        hardcoded_bitrate = min(max(650000 - 55 * self.__frame_count, 50000) + max(0, -742500 + 55 * self.__frame_count), 550000)
+        #hardcoded_bitrate = min(max(650000 - 55 * self.__frame_count, 20000) + max(0, -742500 + 55 * self.__frame_count), 550000)
+
+        #hardcoded_bitrate = min(max(650000 - 55 * 2 * self.__frame_count, 20000) + max(0, -742500 + 55 * 2 * self.__frame_count), 550000)
+        #TODO v garbage
+        hardcoded_bitrate = min(max(650000 - 55 * 16 * self.__frame_count, 20000) + max(0, -742500 + 55 * 16 * self.__frame_count), 550000)
 
         if BITRATE_ESTIMATION == 'perfect':
             target_bitrate = hardcoded_bitrate
@@ -383,6 +415,7 @@ class RTCRtpSender:
             frame.time_base = frame_time_base
 
         frame = stamp_frame(frame, frame_index, frame_pts, frame_time_base)
+
         # get the correct encoder
         if self.__kind == "lr_video":
             if lr_size not in self.__lr_encoders.keys():
@@ -430,6 +463,7 @@ class RTCRtpSender:
         packet = self.__rtp_history.get(sequence_number % RTP_HISTORY_SIZE)
         if packet and packet.sequence_number == sequence_number:
             if self.__rtx_payload_type is not None:
+                print("retransmit ", packet.sequence_number)
                 packet = wrap_rtx(
                     packet,
                     payload_type=self.__rtx_payload_type,
@@ -461,7 +495,11 @@ class RTCRtpSender:
                     continue
 
                 counter += 1
-                (payloads, timestamp), lr_size, bitrate_code  = await self._next_encoded_frame(codec)
+                try:
+                    (payloads, timestamp), lr_size, bitrate_code  = await self._next_encoded_frame(codec)   
+                except:
+                    continue
+
                 self.__log_debug("Frame %s is encoded with resolution %s with len %s at time %s with bitrate_code %s ", 
                                 counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now(), bitrate_code)
                 old_timestamp = timestamp

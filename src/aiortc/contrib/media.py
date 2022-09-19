@@ -24,7 +24,13 @@ from lte_wrapper import SuperResolutionModel
 from skimage import img_as_float32
 import torch
 import torch.nn.functional as F
-import yaml 
+import yaml
+import queue
+
+use_av_conversion = True # if True, use the display_worker
+received_time_place = "display" # options: "wire", "prediction", "display"
+if not use_av_conversion:
+    assert(received_time_place != "display")
 
 config_path = os.environ.get('CONFIG_PATH', 'None')
 checkpoint = os.environ.get('CHECKPOINT_PATH', 'None')
@@ -44,7 +50,7 @@ if generator_type not in ['vpx', 'bicubic']:
     else:
         model = FirstOrderModel(config_path, checkpoint)
 
-    for i in range(10):
+    for i in range(1):
         random_array = np.random.randint(0, 255, model.get_shape(), dtype=np.uint8)
         if generator_type != 'swinir-lte':
             random_kps, src_index = model.extract_keypoints(random_array)
@@ -63,11 +69,11 @@ if generator_type not in ['vpx', 'bicubic']:
 save_keypoints_to_file = False
 save_lr_video_npy = False
 save_predicted_frames = False
-save_sent_frames = True
-save_received_frames = True
+save_sent_frames = False
+save_received_frames = False
 logger = logging.getLogger(__name__)
-
-
+logging.basicConfig(level=logging.ERROR)
+logger.error(f'use_av_conversion {use_av_conversion}, received_time_place {received_time_place}')
 REAL_TIME_FORMATS = [
     "alsa",
     "android_camera",
@@ -144,6 +150,8 @@ def destamp_frame(frame):
 
     destamped_frame = np.uint8(destamped_frame)
     final_frame = av.VideoFrame.from_ndarray(destamped_frame)
+    final_frame.pts = frame.pts
+    final_frame.time_base = frame.time_base
     return final_frame, frame_id
 
 
@@ -614,6 +622,7 @@ class MediaRecorderContext:
         self.task = None
 
 
+
 class MediaRecorder:
     """
     A media sink that writes audio and/or video to a file.
@@ -642,10 +651,10 @@ class MediaRecorder:
         self.__frame_height = None
         self.__frame_width = None
         self.__keypoints_queue = asyncio.Queue()
-        self.__reference_frames_queue = asyncio.Queue()
+        self.__reference_frames_queue :queue.Queue = queue.Queue() #asyncio.Queue()
         self.__real_video_queue = asyncio.Queue()
-        self.__synthetic_video_queue = asyncio.Queue()
-        self.__lr_video_queue = asyncio.Queue()
+        self.__synthetic_video_queue : queue.Queue = queue.Queue()
+        self.__lr_video_queue : queue.Queue = queue.Queue()#asyncio.Queue()
         self.__display_queue = asyncio.Queue()
         self.__save_dir = save_dir
         self.__enable_prediction = enable_prediction
@@ -653,6 +662,9 @@ class MediaRecorder:
         self.__reference_update_freq = reference_update_freq
         self.__output_fps = output_fps
         self.__display_option = "synthetic"
+        self.__prediction_thread : Optional[threading.Thread] = None
+        self.__display_thread : Optional[threading.Thread] = None
+        self.__prediction_times_values = []
         '''
         __display_option could be:
             1. "real": original target-res video
@@ -661,6 +673,7 @@ class MediaRecorder:
         
         if self.__save_dir is not None:
             self.__recv_times_file = open(os.path.join(save_dir, "recv_times.txt"), "w")
+            self.__recv_times_values = []
         else:
             self.__recv_times_file = None
 
@@ -702,11 +715,23 @@ class MediaRecorder:
         for track, context in self.__tracks.items():
             if context.task is None:
                 context.task = asyncio.ensure_future(self.__run_track(track, context))
+        
 
     async def stop(self):
         """
         Stop recording.
         """
+        print('stopping', self.__save_dir)
+        logger.error("(latency) Frame with timestamp %s last frame received  %s", -1, time.perf_counter())
+        self.__recv_times_file = open(os.path.join(self.__save_dir, "recv_times.txt"), "w")
+        if self.__recv_times_file is not None:
+            for frame_index, recv_time in self.__recv_times_values:
+                self.__recv_times_file.write(f'Received {frame_index} at {recv_time}\n')
+                self.__recv_times_file.flush()
+
+        for frame_pts, prediction_time in self.__prediction_times_values:
+            logger.error("(latency) Frame with timestamp %s elapsed_time in prediction-worker %s", frame_pts, prediction_time)
+
         if self.__container:
             for track, context in self.__tracks.items():
                 if context.stream is not None:
@@ -721,12 +746,118 @@ class MediaRecorder:
                 self.__container.close()
                 self.__container = None
 
+
         if self.__recv_times_file is not None:
             self.__recv_times_file.close()
+        
+        if self.__prediction_thread:
+            self.__lr_video_queue.put((None, None, None))
+            self.__prediction_thread.join()
+            self.__prediction_thread = None
+
+        if self.__display_thread:
+            self.__synthetic_video_queue.put((None, None, None))
+            self.__display_thread.join()
+            self.__display_thread = None
+
+
+    def display_worker(self, context):
+        print("Start Display Thread")
+        while True:
+            if self.__enable_prediction:
+                try:
+                    if self.__container is None:
+                        break
+                    if self.__synthetic_video_queue.qsize() < 1:
+                        continue
+        
+                    predicted_target, frame_index, frame_pts = self.__synthetic_video_queue.get()
+                    if predicted_target is None:
+                        break
+                    before_display_time = time.perf_counter()
+                    predicted_frame = av.VideoFrame.from_ndarray(np.array(predicted_target))
+                    display_frame = predicted_frame.reformat(format='yuv420p')
+                    display_frame.pts = frame_pts
+
+                    logger.error("(latency) Frame with timestamp %s elapsed_time converts to VideoFrame in display-worker at time %s",
+                                frame_pts, time.perf_counter() - before_display_time)
+
+                    if self.__recv_times_file is not None and received_time_place == "display":
+                        self.__recv_times_values.append((frame_index, datetime.datetime.now()))
+
+                    self.__log_debug("Frame displayed at receiver %s", frame_index)
+                    try:
+                        for packet in context.stream.encode(display_frame):
+                            self.__container.mux(packet)
+                    except Exception as e:
+                        pass
+
+                    logger.error("(latency) Frame with timestamp %s elapsed_time in display-worker %s",
+                                frame_pts, time.perf_counter() - before_display_time)
+                    if self.__save_dir is not None and save_received_frames:
+                        display_array = display_frame.to_rgb().to_ndarray()
+                        np.save(os.path.join(self.__save_dir,
+                            'receiver_frame_%05d.npy' % frame_index), display_array)
+
+                except Exception as e:
+                    print(e)
+                    self.__log_debug("Couldn't Display Frame %s because %s", e)
+
+
+    def prediction_worker(self, track):
+        print("Start Prediction Thread")
+        starter, ender = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        while True:
+            if self.__enable_prediction:
+                try:
+                    if len(model.source_frames) < 1 or self.__container is None:
+                        continue
+                    lr_frame_array, frame_index, frame_pts = self.__lr_video_queue.get()
+                    before_predict_time_counter = time.perf_counter()
+                    if lr_frame_array is None:
+                        break
+
+                    predicted_target = model.predict_with_lr_video(lr_frame_array, frame_pts)
+                    after_predict_time_counter = time.perf_counter()
+
+                    if self.__container is None:
+                        break
+                    self.__prediction_times_values.append((frame_pts, after_predict_time_counter - before_predict_time_counter))
+
+                    if use_av_conversion:
+                        self.__synthetic_video_queue.put((predicted_target, frame_index, frame_pts))
+                    else:
+                        pass
+                        self.__log_debug("Frame displayed at receiver %s ", frame_index)
+
+                    if self.__recv_times_file is not None and received_time_place == "prediction":
+                        self.__recv_times_values.append((frame_index, datetime.datetime.now()))
+
+                except Exception as e:
+                    print(e)
+                    self.__log_debug("Couldn't predict based on received %s frame %s with warning %s",
+                                'lr_video', frame_index, e)
+
 
     async def __run_track(self, track, context):
         loop = asyncio.get_running_loop()
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        if self.__enable_prediction:
+            self.__prediction_thread = threading.Thread(
+                    target=self.prediction_worker,
+                    name= track.kind + "-predictor",
+                    args=(track, ),
+                )
+            self.__prediction_thread.start()
+
+            if context.stream is not None and use_av_conversion:
+                self.__display_thread = threading.Thread(
+                        target=self.display_worker,
+                        name= track.kind + "-display",
+                        args=(context, ),
+                    )
+                self.__display_thread.start()
+
         while True:
             try:
                 frame = await track.recv()
@@ -735,6 +866,7 @@ class MediaRecorder:
                 return
 
             if track.kind == "video":
+                before_display_time = time.perf_counter()
                 frame, video_frame_index = destamp_frame(frame)
                 self.__frame_height = frame.height
                 self.__frame_width = frame.width
@@ -754,32 +886,28 @@ class MediaRecorder:
                         time_after_keypoints = time.perf_counter()
                         self.__log_debug("Source keypoints extraction time in receiver: %s",
                                         str(time_after_keypoints - time_before_keypoints))
-
-                        asyncio.run_coroutine_threadsafe(self.__reference_frames_queue.put(
-                            (source_frame_array, source_keypoints, video_frame_index)), loop)
-                    
-                    elif self.__display_option == "real":
-                        # directly display the received real video frames
-                        asyncio.run_coroutine_threadsafe(self.__real_video_queue.put(
-                                                        (frame, video_frame_index))
-                                                        , loop)
+                        model.update_source(video_frame_index, source_frame_array, source_keypoints)
                 else:
                     # Original aiortc video stream, no prediction
-                    if self.__recv_times_file is not None:
-                        self.__recv_times_file.write(f'Received {video_frame_index} at {datetime.datetime.now()}\n')
-                        self.__recv_times_file.flush()
-
+                    if video_frame_index == 0:
+                        logger.error("(latency) Frame with timestamp %s first frame received  %s", 0, time.perf_counter())
                     if save_received_frames and self.__save_dir is not None:
                         frame_array = frame.to_rgb().to_ndarray()
                         np.save(os.path.join(self.__save_dir,
                             'receiver_frame_%05d.npy' % video_frame_index), frame_array)
 
-                    self.__log_debug("Frame displayed at receiver %s", video_frame_index)
                     for packet in context.stream.encode(frame):
                         self.__container.mux(packet)
+
                     if video_frame_index % 1000 == 0:
                         print("Displayed ", video_frame_index)
 
+                    if self.__recv_times_file is not None:
+                        self.__recv_times_values.append((video_frame_index, datetime.datetime.now()))
+
+                    self.__log_debug("Frame displayed at receiver %s", video_frame_index)
+                    logger.error("(latency) Frame with timestamp %s elapsed_time in display-worker %s",
+                            frame.pts, time.perf_counter() - before_display_time)
             elif track.kind == "audio":
                 for packet in context.stream.encode(frame):
                     self.__container.mux(packet)
@@ -799,102 +927,16 @@ class MediaRecorder:
 
                 elif track.kind == "lr_video":
                     lr_frame, frame_index = destamp_frame(frame)
+                    if frame_index == 0:
+                        logger.error("(latency) Frame with timestamp %s first frame received  %s", 0, time.perf_counter())
                     lr_frame_array = lr_frame.to_rgb().to_ndarray()
-                    asyncio.run_coroutine_threadsafe(self.__lr_video_queue.put((lr_frame_array, frame_index)), loop)
+                    self.__lr_video_queue.put((lr_frame_array, frame_index, lr_frame.pts))
                     if save_lr_video_npy and self.__save_dir is not None:
                         np.save(os.path.join(self.__save_dir,
-                                'receiver_lr_frame_%05d.npy' % frame_index),
-                                lr_frame_array)
- 
-                self.__log_debug("%s for frame %s received at time %s",
-                                track.kind, str(frame_index), datetime.datetime.now())
+                                'receiver_lr_frame_%05d.npy' % frame_index), lr_frame_array)
 
-                if self.__enable_prediction:
-                    try:
-                        if track.kind == "keypoints":
-                            received_keypoints = await self.__keypoints_queue.get()
-                            frame_index = received_keypoints['frame_index']
-                        elif track.kind == "lr_video":
-                            lr_frame_array, frame_index = await self.__lr_video_queue.get()
-                        if self.__display_option == "synthetic":
-                            if frame_index % self.__reference_update_freq == 0 and \
-                                    generator_type not in ['bicubic', 'swinir-lte']:
-                                source_frame_array, source_keypoints, source_frame_index = await self.__reference_frames_queue.get()
+                self.__log_debug("%s for frame %s received at time %s", track.kind, str(frame_index), datetime.datetime.now())
 
-                                time_before_update = time.perf_counter()
-                                model.update_source(source_frame_index, source_frame_array, source_keypoints)
-                                time_after_update = time.perf_counter()
-                                self.__log_debug("Time to update source frame %s in receiver" \
-                                        " when receiving %s %s: %s",
-                                        source_frame_index, track.kind, frame_index, \
-                                        str(time_after_update - time_before_update))
-                                if save_sent_frames and self.__save_dir is not None:
-                                    np.save(os.path.join(self.__save_dir,
-                                        'reference_frame_%05d.npy' % source_frame_index), source_frame_array)
-
-                            with concurrent.futures.ThreadPoolExecutor() as pool:
-                                if generator_type not in ['bicubic', 'swinir-lte']:
-                                    self.__log_debug("Calling predict for frame %s with source frame %s",
-                                                frame_index, source_frame_index)
-                                before_predict_time = time.perf_counter()
-                                if track.kind == "keypoints":
-                                    predicted_target = await loop.run_in_executor(pool, \
-                                            model.predict, received_keypoints)
-                                elif track.kind == "lr_video":
-                                    if generator_type == "bicubic":
-                                        predicted_target = lr_frame.reformat(width=frame_shape[0], height=frame_shape[0],\
-                                                            interpolation='BICUBIC').to_rgb().to_ndarray()
-
-                                    else:
-                                        predicted_target = await loop.run_in_executor(pool, \
-                                                model.predict_with_lr_video, lr_frame_array)
-
-                            after_predict_time = time.perf_counter()
-                            self.__log_debug("Prediction time for received %s %s: %s at time %s",
-                                    track.kind, frame_index, str(after_predict_time - before_predict_time),
-                                    after_predict_time)
-
-                            if self.__recv_times_file is not None:
-                                self.__recv_times_file.write(f'Received {frame_index} at {datetime.datetime.now()}\n')
-                                self.__recv_times_file.flush()
-
-                            predicted_frame = av.VideoFrame.from_ndarray(np.array(predicted_target))
-                            predicted_frame = predicted_frame.reformat(format='yuv420p')
-                            asyncio.run_coroutine_threadsafe(self.__synthetic_video_queue.put(
-                                                            (predicted_frame, frame_index)),
-                                                            loop)
-                            #predicted_frame.pts = received_keypoints['pts']
-                            if frame_index % 1000 == 0:
-                                print("Predicted!", frame_index)
-
-                            if save_predicted_frames and self.__save_dir is not None:
-                                predicted_array = np.array(predicted_target)
-                                np.save(os.path.join(self.__save_dir,
-                                    'predicted_frame_%05d.npy' % frame_index), predicted_array)
-                    except Exception as e:
-                        print(e)
-                        self.__log_debug("Couldn't predict based on received %s frame %s with error %s",
-                                    track.kind, frame_index, e)
-
-                #read from the proper real/syn queue, write in display queue
-                if self.__display_option == "real":
-                    display_frame, frame_index = await self.__real_video_queue.get()
-                else:
-                    display_frame, frame_index = await self.__synthetic_video_queue.get()
-
-                asyncio.run_coroutine_threadsafe(self.__display_queue.put(
-                                                (display_frame, frame_index)),
-                                                loop)
-                #read from the display queue, and write in the file
-                display_frame, frame_index = await self.__display_queue.get()
-                self.__log_debug("Frame displayed at receiver %s", frame_index)
-                for packet in context.stream.encode(display_frame):
-                    self.__container.mux(packet)
-
-                if self.__save_dir is not None and save_received_frames:
-                    display_array = display_frame.to_rgb().to_ndarray()
-                    np.save(os.path.join(self.__save_dir,
-                            'receiver_frame_%05d.npy' % frame_index), display_array)
 
     def __log_debug(self, msg: str, *args) -> None:
         logger.debug(f"MediaRecorder(%s) {msg}", self.__container.name, *args)

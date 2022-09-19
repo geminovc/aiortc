@@ -5,6 +5,7 @@ import queue
 import random
 import threading
 import time
+import datetime
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
@@ -45,7 +46,9 @@ from .stats import (
 )
 from .utils import uint16_add, uint16_gt
 
+#logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
+
 
 
 def decoder_worker(loop, input_q, output_q):
@@ -59,7 +62,10 @@ def decoder_worker(loop, input_q, output_q):
             asyncio.run_coroutine_threadsafe(output_q.put(None), loop)
             break
         codec, encoded_frame = task
-
+        before_decoder_time = time.perf_counter()
+        #logger.error(f"(latency) Frame with timestamp %s arrival in decoder-worker at time %s",
+        #                encoded_frame.timestamp, before_decoder_time)
+        
         if codec.name != codec_name:
             decoder = get_decoder(codec)
             codec_name = codec.name
@@ -67,7 +73,8 @@ def decoder_worker(loop, input_q, output_q):
 
 
         decoded_frames = decoder.decode(encoded_frame)
-        logger.debug(f"RTCRtpReceiver(%s) decoding timestamp %s, got %d frames", codec_name, encoded_frame.timestamp, len(decoded_frames))
+        logger.error(f"(latency) Frame with timestamp %s elapsed_time in decoder-worker at time %s",
+                encoded_frame.timestamp, time.perf_counter() - before_decoder_time)
 
         for frame in decoded_frames:
             # pass the decoded frame to the track
@@ -273,7 +280,7 @@ class RTCRtpReceiver:
             self.__remote_bitrate_estimator = RemoteBitrateEstimator()
         else:
             # for "video"
-            self.__jitter_buffer = JitterBuffer(capacity=128, is_video=True)
+            self.__jitter_buffer = JitterBuffer(capacity=16384, is_video=True)
             self.__nack_generator = NackGenerator()
             self.__remote_bitrate_estimator = RemoteBitrateEstimator()
         self._track: Optional[RemoteStreamTrack] = None

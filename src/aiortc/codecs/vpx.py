@@ -13,6 +13,7 @@ from ._vpx import ffi, lib
 from .base import Decoder, Encoder
 
 import os
+import time
 
 DEFAULT_BITRATE = int(os.environ.get('VPX_DEFAULT_BITRATE', 500000))
 MIN_BITRATE = int(os.environ.get('VPX_MIN_BITRATE', 50000))
@@ -195,7 +196,7 @@ class Vp8Decoder(Decoder):
             ffi.NULL,
             lib.VPX_DL_REALTIME,
         )
-        
+        before_decode_time = time.perf_counter()
         if result == lib.VPX_CODEC_OK:
             it = ffi.new("vpx_codec_iter_t *")
             while True:
@@ -226,7 +227,8 @@ class Vp8Decoder(Decoder):
                         o_pos += o_stride
 
                 frames.append(frame)
-
+        after_decode_time = time.perf_counter()
+        logger.warning(f"Decoding JitterFrame to VideoFrame with pts {frame.pts} took {after_decode_time - before_decode_time} finished at {after_decode_time} started at {before_decode_time}")
         return frames
 
 
@@ -272,6 +274,7 @@ class Vp8Encoder(Encoder):
     def encode(
             self, frame: Frame, force_keyframe: bool = False, quantizer: int = 32, target_bitrate: int = 100000, enable_gcc: bool = False) -> Tuple[List[bytes], int]:
         assert isinstance(frame, VideoFrame)
+        before_encode_time = time.perf_counter()
         if frame.format.name != "yuv420p":
             frame = frame.reformat(format="yuv420p")
 
@@ -409,6 +412,9 @@ class Vp8Encoder(Encoder):
 
         timestamp = convert_timebase(frame.pts, frame.time_base, VIDEO_TIME_BASE)
         logger.warning("encoding frame " + str(timestamp) + " type:" +  str(frame.pict_type) + " force keyframe:" + str(force_keyframe))
+        after_encode_time = time.perf_counter()
+        logger.warning(f"Encoding frame with timestamp {frame.pts} took {after_encode_time - before_encode_time} finished at {after_encode_time}")
+
         return payloads, timestamp
 
     @property

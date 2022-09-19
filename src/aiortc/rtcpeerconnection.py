@@ -1093,7 +1093,7 @@ class RTCPeerConnection(AsyncIOEventEmitter):
         return rtp
 
     def __log_debug(self, msg: str, *args) -> None:
-        logger.debug(f"RTCPeerConnection() {msg}", *args)
+        logger.error(f"RTCPeerConnection() {msg}", *args)
 
     def __remoteDescription(self) -> Optional[sdp.SessionDescription]:
         return self.__pendingRemoteDescription or self.__currentRemoteDescription

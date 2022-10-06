@@ -1,6 +1,6 @@
 [submodule "SwinIR"]
 	path = SwinIR
-	url = git@github.com:pkarimib/SwinIR.git
+	url = git@github.com:geminovc/SwinIR.git
 [submodule "gemino_model"]
 	path = gemino_model
 	url = git@github.com:geminovc/model.git

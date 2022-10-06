@@ -1,6 +1,3 @@
-[submodule "lte"]
-	path = lte
-	url = https://github.com/pkarimib/lte
 [submodule "SwinIR"]
 	path = SwinIR
 	url = git@github.com:pkarimib/SwinIR.git

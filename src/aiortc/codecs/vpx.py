@@ -244,25 +244,20 @@ class Vp8Encoder(Encoder):
         self.__target_bitrate = DEFAULT_BITRATE
         self.__update_config_needed = False
         self.enable_gcc = False
-        """ This implementation of the codec seems to need a transformsation
-            from target bitrate to the supplied bitrate to vpx (values in bps)
-        """
-        self.vpx_bitrate_conversion_dict = {(0, 30000): 100000,
-                                            (30000, 60000): 200000,
-                                            (60000, 90000): 400000,
-                                            (90000, 120000): 500000,
-                                            (120000, 240000): 1000000,
-                                            (240000, 360000): 1500000,
-                                            (360000, 480000): 2500000,
-                                            (480000, 550000): 3000000,
-                                            (550000, 600000): 5000000}
 
-    def get_vpx_bitrate(self, target_bitrate):
-        if target_bitrate is not None:
-            for low, high in self.vpx_bitrate_conversion_dict.keys():
-                if low <= target_bitrate and target_bitrate < high:
-                    return  self.vpx_bitrate_conversion_dict[(low, high)]
-        return None
+    def get_vpx_bitrate(self, target_bitrate, frame_width=None):
+        """
+        This transformation has been found outside aiortc by testing different values
+        as target bitrate and comparing with the actual resulting bitrate. This is not
+        resolution dependent.
+        """
+        x1, y1 = 425878.500749625, 2500000
+        x2, y2 = 68829.0254872563, 400000
+
+        #if frame_width < 1024:
+        return int((y2 - y1)/(x2 - x1) * (target_bitrate - x1) + y1)
+        #else:
+        #    return int((y2 - y1)/(x2 - x1) * ((target_bitrate + 250000) - x1) + y1)
 
     def __del__(self) -> None:
         if self.codec:

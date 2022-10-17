@@ -55,10 +55,10 @@ BITRATE_PAYLOAD_DICT = {15000: 0,
                         420000: 5,
                         600000: 6}
 INV_BITRATE_PAYLOAD_DICT = {v: k for k, v in BITRATE_PAYLOAD_DICT.items()}
-BITRATE_ESTIMATION = "perfect"
+BITRATE_ESTIMATION = "perfect" #"perfect" #"gcc"
 NUM_ROWS = 10
 NUMBER_OF_BITS = 16
-
+#logging.basicConfig(level=logging.ERROR)
 def frame_to_tensor(frame, device):
     array = np.expand_dims(frame, 0).transpose(0, 3, 1, 2)
     array = torch.from_numpy(array)
@@ -347,8 +347,8 @@ class RTCRtpSender:
                 bitrate, ssrcs = unpack_remb_fci(packet.fci)
                 if self._ssrc in ssrcs:
                     if BITRATE_ESTIMATION == 'gcc':
-                        self.__log_debug(
-                            "- receiver estimated maximum bitrate %d bps at time %s", bitrate, datetime.datetime.now()
+                        logger.error(
+                                f"RTCRtpSender({self.__kind}) - receiver estimated maximum bitrate {bitrate} bps at time {datetime.datetime.now()}"
                         )
                         self.__gcc_target_bitrate = bitrate
             except ValueError:
@@ -387,17 +387,21 @@ class RTCRtpSender:
         self.__log_debug("frame width %s height %s in _next_encoded_frame", frame.width, frame.height)
         # harcode the bitrate
         self.__frame_count += 1
+        # Initial trace
         #hardcoded_bitrate = min(max(650000 - 55 * self.__frame_count, 20000) + max(0, -742500 + 55 * self.__frame_count), 550000)
-
+        
+        # Shrinked initial trace
         #hardcoded_bitrate = min(max(650000 - 55 * 2 * self.__frame_count, 20000) + max(0, -742500 + 55 * 2 * self.__frame_count), 550000)
-        #TODO v garbage
-        hardcoded_bitrate = min(max(650000 - 55 * 16 * self.__frame_count, 20000) + max(0, -742500 + 55 * 16 * self.__frame_count), 550000)
+        # Final trace
+        hardcoded_bitrate = min(max(750000 - 55 * 2 * self.__frame_count, 20000) + \
+                            max(0, -942500 + 55 * 2 * self.__frame_count), 650000)
 
         if BITRATE_ESTIMATION == 'perfect':
             target_bitrate = hardcoded_bitrate
-            self.__log_debug(
-                     "- receiver estimated maximum bitrate %d bps at time %s", hardcoded_bitrate,
-                     datetime.datetime.now())
+            #self.__log_debug(
+            #         "- receiver estimated maximum bitrate %d bps at time %s", hardcoded_bitrate,
+            #         datetime.datetime.now())
+            #RTCRtpSender({self.__kind}) - receiver estimated maximum bitrate {} bps at time %s
         else:
             target_bitrate = self.__gcc_target_bitrate
 
@@ -500,8 +504,10 @@ class RTCRtpSender:
                 except:
                     continue
 
-                self.__log_debug("Frame %s is encoded with resolution %s with len %s at time %s with bitrate_code %s ", 
-                                counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now(), bitrate_code)
+                #self.__log_debug("Frame %s is encoded with resolution %s with len %s at time %s with bitrate_code %s ", 
+                #                counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now(), bitrate_code)
+                logger.error("RTCRtpSender(%s) Frame %s is encoded with resolution %s with len %s at time %s with bitrate_code %s ", 
+                                self.__kind, counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now(), bitrate_code)
                 old_timestamp = timestamp
                 timestamp = uint32_add(timestamp_origin, timestamp)
                 if self.__kind == "lr_video" and lr_size is not None and bitrate_code is not None:

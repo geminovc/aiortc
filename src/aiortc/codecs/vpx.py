@@ -258,11 +258,14 @@ class Vp8Encoder(Encoder):
                                             (550000, 600000): 5000000}
 
     def get_vpx_bitrate(self, target_bitrate):
-        if target_bitrate is not None:
-            for low, high in self.vpx_bitrate_conversion_dict.keys():
-                if low <= target_bitrate and target_bitrate < high:
-                    return  self.vpx_bitrate_conversion_dict[(low, high)]
-        return None
+        # needle_drop
+        x1, y1 = 425878.500749625, 2500000
+        x2, y2 = 68829.0254872563, 400000
+
+        #xiran
+        #x1, y1 = 741442.567248702 + 100000, 3000000
+        #x2, y2 = 370717.508258612 + 100000, 1500000
+        return int((y2 - y1)/(x2 - x1) * (target_bitrate - x1) + y1)
 
     def __del__(self) -> None:
         if self.codec:
@@ -403,6 +406,10 @@ class Vp8Encoder(Encoder):
         while pos < length:
             descr_bytes = bytes(descr)
             size = min(length - pos, PACKET_MAX - len(descr_bytes))
+            # TODO: add the reseloution information here (first byte of the buffer)
+            # make sure that the buffer output is the same as input of jitterbuffer
+            # TODO: add assertions to the code
+            # dump all the outputs of the encoder and the inputs of the jitterbuffer
             payloads.append(descr_bytes + self.buffer[pos : pos + size])
             descr.partition_start = 0
             pos += size

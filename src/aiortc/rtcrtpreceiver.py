@@ -273,7 +273,7 @@ class RTCRtpReceiver:
             self.__nack_generator = NackGenerator()
             self.__remote_bitrate_estimator = None
         elif kind == "lr_video":
-            self.__jitter_buffer = JitterBuffer(capacity=128, is_video=True)
+            self.__jitter_buffer = JitterBuffer(capacity=16384, is_video=True)
             self.__nack_generator = NackGenerator()
             self.__remote_bitrate_estimator = RemoteBitrateEstimator()
             self.__stream_resolutions = [128, 256, 512, 1024]
@@ -536,6 +536,7 @@ class RTCRtpReceiver:
         try:
             if packet.payload:
                 if self.__kind == "lr_video" and packet.payload in [bytes([i]) for i in range(0, 11)]:
+                    # TODO: make sure it's actuallly the resolution
                     packet._data = packet.payload  # type: ignore
                     self.__log_debug("resolution or bitrate_code in bytes %s", packet.payload)
                 else:
@@ -564,6 +565,7 @@ class RTCRtpReceiver:
             if self.__kind == "lr_video":
                 """ parse the resolution from the payload for lr_video"""
                 data = encoded_frame.data
+                # TODO: there's no explicit check, fix this
                 frame_resolution = 2 ** int(data[0])
                 target_bitrate = INV_BITRATE_PAYLOAD_DICT[int(data[1])]
                 self.__current_stream_resoluton = frame_resolution

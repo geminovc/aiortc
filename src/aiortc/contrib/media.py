@@ -20,7 +20,6 @@ from ..mediastreams import AUDIO_PTIME, MediaStreamError, MediaStreamTrack, Keyp
 from first_order_model.fom_wrapper import FirstOrderModel
 from first_order_model.reconstruction import frame_to_tensor, resize_tensor_to_array
 from first_order_model.utils import get_main_config_params
-from lte_wrapper import SuperResolutionModel
 from skimage import img_as_float32
 import torch
 import torch.nn.functional as F
@@ -906,7 +905,6 @@ class MediaRecorder:
                                             model_zoo[('no_lr_video', 0)].predict, received_keypoints)
                                 elif track.kind == "lr_video":
                                     lr_size = lr_frame_array.shape[1]
-                                    #print(lr_size, target_bitrate, 'in media')
                                     if lr_size < 1024:
                                         if generator_type == "bicubic":
                                             predicted_target = lr_frame.reformat(width=frame_shape[0], height=frame_shape[0],\
@@ -935,7 +933,7 @@ class MediaRecorder:
                                         after_predict_time, lr_size, target_bitrate)
 
                             if self.__recv_times_file is not None:
-                                self.__recv_times_file.write(f'Received {frame_index} at {datetime.datetime.now()}\n')
+                                self.__recv_times_file.write(f'Received {frame_index} at {datetime.datetime.now()} resolution {lr_frame.width}\n')
                                 self.__recv_times_file.flush()
 
                             predicted_frame = av.VideoFrame.from_ndarray(np.array(predicted_target))

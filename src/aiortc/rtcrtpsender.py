@@ -389,10 +389,10 @@ class RTCRtpSender:
         self.__frame_count += 1
 
         # bitrate of for paper
-        hardcoded_bitrate = min(max(750000 - 110 * self.__frame_count, 20000) + max(0, -942500 + 110* self.__frame_count), 650000)
+        # hardcoded_bitrate = min(max(750000 - 110 * self.__frame_count, 20000) + max(0, -942500 + 110* self.__frame_count), 650000)
 
-        # TODO for Vibha: bitrate for 1Mbps that goes down to 20kbps
-        #hardcoded_bitrate = min(max(1200000 - 55 * 2 * self.__frame_count, 20000) + max(0, -942500 + 55 * 2 * self.__frame_count), 1000000)
+        # 1 mbps to 20 kbps range
+        hardcoded_bitrate = min(max(1200000 - 55 * 3 * self.__frame_count, 20000) + max(0, -1175000 + 55 * 3 * self.__frame_count), 1000000)
 
         if BITRATE_ESTIMATION == 'perfect':
             target_bitrate = hardcoded_bitrate

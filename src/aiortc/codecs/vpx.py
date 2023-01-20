@@ -436,6 +436,275 @@ class Vp8Encoder(Encoder):
         self.cfg.rc_target_bitrate = self.__target_bitrate // 1000
         self.__update_config_needed = False
 
+class Vp9Decoder(Decoder):
+    def __init__(self) -> None:
+        self.codec = ffi.new("vpx_codec_ctx_t *")
+        _vpx_assert(
+            lib.vpx_codec_dec_init(self.codec, lib.vpx_codec_vp9_dx(), ffi.NULL, 0)
+        )
+
+        ppcfg = ffi.new("vp8_postproc_cfg_t *")
+        
+        # XXX vp9 uses the same flags
+        ppcfg.post_proc_flag = lib.VP8_DEMACROBLOCK | lib.VP8_DEBLOCK
+        ppcfg.deblocking_level = 3
+        lib.vpx_codec_control_(self.codec, lib.VP8_SET_POSTPROC, ppcfg)
+
+    def __del__(self) -> None:
+        lib.vpx_codec_destroy(self.codec)
+
+    def decode(self, encoded_frame: JitterFrame) -> List[Frame]:
+        frames: List[Frame] = []
+        result = lib.vpx_codec_decode(
+            self.codec,
+            encoded_frame.data,
+            len(encoded_frame.data),
+            ffi.NULL,
+            lib.VPX_DL_REALTIME,
+        )
+        
+        if result == lib.VPX_CODEC_OK:
+            it = ffi.new("vpx_codec_iter_t *")
+            while True:
+                img = lib.vpx_codec_get_frame(self.codec, it)
+                if not img:
+                    break
+                assert img.fmt == lib.VPX_IMG_FMT_I420
+
+                frame = VideoFrame(width=img.d_w, height=img.d_h)
+                frame.pts = encoded_frame.timestamp
+                frame.time_base = VIDEO_TIME_BASE
+
+                for p in range(3):
+                    i_stride = img.stride[p]
+                    i_buf = ffi.buffer(img.planes[p], i_stride * img.d_h)
+                    i_pos = 0
+
+                    o_stride = frame.planes[p].line_size
+                    o_buf = memoryview(cast(bytes, frame.planes[p]))
+                    o_pos = 0
+
+                    div = p and 2 or 1
+                    for r in range(0, img.d_h // div):
+                        o_buf[o_pos : o_pos + o_stride] = i_buf[
+                            i_pos : i_pos + o_stride
+                        ]
+                        i_pos += i_stride
+                        o_pos += o_stride
+
+                frames.append(frame)
+
+        return frames
+
+class Vp9Encoder(Encoder):
+    def __init__(self) -> None:
+        self.cx = lib.vpx_codec_vp9_cx()
+
+        self.cfg = ffi.new("vpx_codec_enc_cfg_t *")
+        lib.vpx_codec_enc_config_default(self.cx, self.cfg, 0)
+
+        self.buffer = bytearray(8000)
+        self.codec = None
+        self.picture_id = random.randint(0, (1 << 15) - 1)
+        self.timestamp_increment = VIDEO_CLOCK_RATE // MAX_FRAME_RATE
+        self.__target_bitrate = DEFAULT_BITRATE
+        self.__update_config_needed = False
+        self.enable_gcc = False
+        """ This implementation of the codec seems to need a transformsation
+            from target bitrate to the supplied bitrate to vpx (values in bps)
+        """
+        self.vpx_bitrate_conversion_dict = {(0, 30000): 100000,
+                                            (30000, 60000): 200000,
+                                            (60000, 90000): 400000,
+                                            (90000, 120000): 500000,
+                                            (120000, 240000): 1000000,
+                                            (240000, 360000): 1500000,
+                                            (360000, 480000): 2500000,
+                                            (480000, 600000): 3000000,
+                                            (600000, 720000): 3500000,
+                                            (720000, 840000): 4000000,
+                                            (840000, 1100000): 4500000}
+
+    def get_vpx_bitrate(self, target_bitrate):
+        for low, high in self.vpx_bitrate_conversion_dict.keys():
+            if low <= target_bitrate and target_bitrate < high:
+                return  self.vpx_bitrate_conversion_dict[(low, high)]
+        return None
+
+    def __del__(self) -> None:
+        if self.codec:
+            lib.vpx_codec_destroy(self.codec)
+
+    def encode(
+            self, frame: Frame, force_keyframe: bool = False, quantizer: int = 32, target_bitrate: int = 100000, enable_gcc: bool = False) -> Tuple[List[bytes], int]:
+        assert isinstance(frame, VideoFrame)
+        if frame.format.name != "yuv420p":
+            frame = frame.reformat(format="yuv420p")
+
+        if self.codec and (frame.width != self.cfg.g_w or frame.height != self.cfg.g_h):
+            lib.vpx_codec_destroy(self.codec)
+            self.codec = None
+
+        self.enable_gcc = enable_gcc
+        if not self.codec:
+            # create codec
+            self.codec = ffi.new("vpx_codec_ctx_t *")
+            self.cfg.g_timebase.num = 1
+            self.cfg.g_timebase.den = VIDEO_CLOCK_RATE
+            self.cfg.g_lag_in_frames = 0
+            self.cfg.g_threads = number_of_threads(
+                frame.width * frame.height, multiprocessing.cpu_count()
+            )
+            self.cfg.g_w = frame.width
+            self.cfg.g_h = frame.height
+            self.cfg.rc_resize_allowed = 0
+            self.cfg.rc_end_usage = lib.VPX_CBR
+            """ quantizer = -1 is the full range quantizer in range 0 and 63 """
+            self.cfg.rc_min_quantizer = quantizer if quantizer > 0 else 0
+            self.cfg.rc_max_quantizer = quantizer if quantizer > 0 else 63
+            self.cfg.rc_undershoot_pct = 100
+            self.cfg.rc_overshoot_pct = 15
+            self.cfg.rc_buf_initial_sz = 500
+            self.cfg.rc_buf_optimal_sz = 600
+            self.cfg.rc_buf_sz = 1000
+            self.cfg.kf_mode = lib.VPX_KF_AUTO
+            self.cfg.kf_max_dist = 3000
+            self.vpx_min_bitrate = MIN_BITRATE
+            self.vpx_max_bitrate = MAX_BITRATE
+            if quantizer < 0 and not enable_gcc and MIN_BITRATE != MAX_BITRATE:
+                """ Setting the bitrate to target_bitrate in quantizer when full range
+                    if MIN_BITRATE != MAX_BITRATE
+                """
+                vpx_bitrate = self.get_vpx_bitrate(target_bitrate)
+                if vpx_bitrate is not None:
+                    self.vpx_min_bitrate = vpx_bitrate
+                    self.vpx_max_bitrate = vpx_bitrate
+                    self.__target_bitrate = vpx_bitrate
+
+            logger.info(f"encoder's config: min_quantizer {str(self.cfg.rc_min_quantizer)}, "\
+                        f"max_quantizer {str(self.cfg.rc_max_quantizer)}, "\
+                        f"kf_max_dist {str(self.cfg.kf_max_dist)}, "\
+                        f"DEFAULT_BITRATE {self.__target_bitrate}, MIN_BITRATE {self.vpx_min_bitrate}, "\
+                        f"MAX_BITRATE {self.vpx_max_bitrate}, "\
+                        f"buf_optimal_sz {str(self.cfg.rc_buf_optimal_sz)}, buf_sz {str(self.cfg.rc_buf_sz)}, "\
+                        f"buf_initial_sz {str(self.cfg.rc_buf_initial_sz)}, ")
+            self.__update_config()
+            _vpx_assert(lib.vpx_codec_enc_init(self.codec, self.cx, self.cfg, 0))
+
+            lib.vpx_codec_control_(
+                self.codec, lib.VP9E_SET_NOISE_SENSITIVITY, ffi.cast("int", 1)
+            )
+
+            lib.vpx_codec_control_(
+                self.codec, lib.VP8E_SET_STATIC_THRESHOLD, ffi.cast("int", 1)
+            )
+            lib.vpx_codec_control_(
+                self.codec, lib.VP8E_SET_CPUUSED, ffi.cast("int", -6)
+            )
+
+            # XXX not supported in VP9
+            # lib.vpx_codec_control_(
+            #     self.codec,
+            #     lib.VP8E_SET_TOKEN_PARTITIONS,
+            #     ffi.cast("int", lib.VP8_ONE_TOKENPARTITION),
+            # )
+
+            # create image on a dummy buffer, we will fill the pointers during encoding
+            self.image = ffi.new("vpx_image_t *")
+            lib.vpx_img_wrap(
+                self.image,
+                lib.VPX_IMG_FMT_I420,
+                frame.width,
+                frame.height,
+                1,
+                ffi.cast("void*", 1),
+            )
+        elif self.__update_config_needed:
+            self.__update_config()
+            _vpx_assert(lib.vpx_codec_enc_config_set(self.codec, self.cfg))
+
+        # setup image
+        for p in range(3):
+            self.image.planes[p] = ffi.cast("void*", frame.planes[p].buffer_ptr)
+            self.image.stride[p] = frame.planes[p].line_size
+
+        # encode frame
+        flags = 0
+        if force_keyframe:
+            flags |= lib.VPX_EFLAG_FORCE_KF
+        _vpx_assert(
+            lib.vpx_codec_encode(
+                self.codec,
+                self.image,
+                frame.pts,
+                self.timestamp_increment,
+                flags,
+                lib.VPX_DL_REALTIME,
+            )
+        )
+
+        it = ffi.new("vpx_codec_iter_t *")
+        length = 0
+        while True:
+            pkt = lib.vpx_codec_get_cx_data(self.codec, it)
+            if not pkt:
+                break
+            elif pkt.kind == lib.VPX_CODEC_CX_FRAME_PKT:
+                # resize buffer if needed
+                if length + pkt.data.frame.sz > len(self.buffer):
+                    new_buffer = bytearray(length + pkt.data.frame.sz)
+                    new_buffer[0:length] = self.buffer[0:length]
+                    self.buffer = new_buffer
+
+                # append new data
+                self.buffer[length : length + pkt.data.frame.sz] = ffi.buffer(
+                    pkt.data.frame.buf, pkt.data.frame.sz
+                )
+                length += pkt.data.frame.sz
+
+        # packetize
+        payloads = []
+        descr = VpxPayloadDescriptor(
+            partition_start=1, partition_id=0, picture_id=self.picture_id
+        )
+        pos = 0
+        while pos < length:
+            descr_bytes = bytes(descr)
+            size = min(length - pos, PACKET_MAX - len(descr_bytes))
+            payloads.append(descr_bytes + self.buffer[pos : pos + size])
+            descr.partition_start = 0
+            pos += size
+        self.picture_id = (self.picture_id + 1) % (1 << 15)
+
+        timestamp = convert_timebase(frame.pts, frame.time_base, VIDEO_TIME_BASE)
+        logger.warning("encoding frame " + str(timestamp) + " type:" +  str(frame.pict_type) + " force keyframe:" + str(force_keyframe))
+        return payloads, timestamp
+
+    @property
+    def target_bitrate(self) -> int:
+        """
+        Target bitrate in bits per second.
+        """
+        return self.__target_bitrate
+
+    @target_bitrate.setter
+    def target_bitrate(self, bitrate: int) -> None:
+        if self.enable_gcc:
+            vpx_bitrate = self.get_vpx_bitrate(bitrate)
+            if vpx_bitrate is not None:
+                bitrate = vpx_bitrate
+            else:
+                bitrate = int((bitrate * 1000 / 173 + 184971))
+
+            bitrate = max(self.vpx_min_bitrate, min(bitrate, self.vpx_max_bitrate))
+            if bitrate != self.__target_bitrate:
+                self.__target_bitrate = bitrate
+                self.__update_config_needed = True
+
+    def __update_config(self) -> None:
+        self.cfg.rc_target_bitrate = self.__target_bitrate // 1000
+        self.__update_config_needed = False
+
 
 def vp8_depayload(payload: bytes) -> bytes:
     descriptor, data = VpxPayloadDescriptor.parse(payload)

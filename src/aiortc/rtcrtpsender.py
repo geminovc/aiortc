@@ -512,6 +512,9 @@ class RTCRtpSender:
                     """
                     resolution_payload = bytes([int(math.log(lr_size,2))])
                     bitrate_payload = bytes([int(bitrate_code)])
+                    payload_len = [p for p in payloads if len(p) < 15]
+                    if len(payload_len) > 0:
+                        print("resolution", resolution_payload, "bitrate", bitrate_payload, "short payloads", payload_len)
                     payloads= [resolution_payload] + [bitrate_payload] + payloads
 
                 for i, payload in enumerate(payloads):

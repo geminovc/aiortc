@@ -55,7 +55,7 @@ BITRATE_PAYLOAD_DICT = {15000: 0,
                         420000: 5,
                         600000: 6}
 INV_BITRATE_PAYLOAD_DICT = {v: k for k, v in BITRATE_PAYLOAD_DICT.items()}
-BITRATE_ESTIMATION = "perfect"
+BITRATE_ESTIMATION = "gcc"
 NUM_ROWS = 10
 NUMBER_OF_BITS = 16
 

@@ -64,11 +64,10 @@ def decoder_worker(loop, input_q, output_q):
         if codec.name != codec_name:
             decoder = get_decoder(codec)
             codec_name = codec.name
-            logger.debug(f"RTCRtpReceiver(%s) retrieved the decoder", codec_name)
-
 
         decoded_frames = decoder.decode(encoded_frame)
-        logger.debug(f"RTCRtpReceiver(%s) decoding timestamp %s, got %d frames", codec_name, encoded_frame.timestamp, len(decoded_frames))
+        logger.debug(f"RTCRtpReceiver(%s) decoding timestamp %s, got %d frames, target_bitrate %s",
+                        codec_name, encoded_frame.timestamp, len(decoded_frames), target_bitrate)
 
         for frame in decoded_frames:
             # pass the decoded frame to the track
@@ -381,10 +380,7 @@ class RTCRtpReceiver:
             for codec in parameters.codecs:
                 for resolution in self.__stream_resolutions:
                     self.__codecs[(codec.payloadType, resolution)] = codec
-                    if not is_rtx(codec):
-                        print("not is_rtx", codec.name, codec.payloadType, resolution)
-                    else:
-                        print("is_rtx", codec.name, codec.payloadType, resolution)
+                    print(self.__kind, ": Initiating encoder for resolution", resolution)
  
             for encoding in parameters.encodings:
                 if encoding.rtx:
@@ -457,8 +453,7 @@ class RTCRtpReceiver:
         """
         Handle an incoming RTP packet.
         """
-        self.__log_debug("< RTP %s arrival time:%d %s", 
-                         packet, arrival_time_ms, datetime.datetime.now())
+        self.__log_debug("< RTP %s (encoded frame ts: x) %s", packet, datetime.datetime.now())
 
         """
         if (packet.sequence_number == 3000):
@@ -535,12 +530,7 @@ class RTCRtpReceiver:
         # parse codec-specific information
         try:
             if packet.payload:
-                if self.__kind == "lr_video" and packet.payload in [bytes([i]) for i in range(0, 11)]:
-                    # TODO: make sure it's actuallly the resolution
-                    packet._data = packet.payload  # type: ignore
-                    self.__log_debug("resolution or bitrate_code in bytes %s", packet.payload)
-                else:
-                    packet._data = depayload(codec, packet.payload)
+                packet._data = depayload(codec, packet.payload)  # type: ignore
             else:
                 packet._data = b""  # type: ignore
         except ValueError as exc:
@@ -562,18 +552,16 @@ class RTCRtpReceiver:
             encoded_frame.timestamp = self.__timestamp_mapper.map(
                 encoded_frame.timestamp
             )
-            if self.__kind == "lr_video":
-                """ parse the resolution from the payload for lr_video"""
-                data = encoded_frame.data
-                # TODO: there's no explicit check, fix this
-                frame_resolution = 2 ** int(data[0])
-                target_bitrate = INV_BITRATE_PAYLOAD_DICT[int(data[1])]
-                self.__current_stream_resoluton = frame_resolution
-                encoded_frame.data = data[2:]
-            else:
-                frame_resolution = 1024
-                target_bitrate = None
-            codec = self.__codecs.get((packet.payload_type, frame_resolution)) 
+            """ parse the resolution from the payload """
+            data = encoded_frame.data
+            assert(int(data[-2]) in [i for i in range(0, 11)])
+            assert(int(data[-1]) in [i for i in range(0, 11)])
+            frame_resolution = 2 ** int(data[-2])
+            target_bitrate = INV_BITRATE_PAYLOAD_DICT[int(data[-1])]
+            self.__current_stream_resoluton = frame_resolution
+            encoded_frame.data = data[:-2]
+
+            codec = self.__codecs.get((packet.payload_type, frame_resolution))
             self.__decoder_queue.put((codec, encoded_frame, target_bitrate))
             self.__log_debug("Put frame timestamp %s into decoder queue with resolution %s and target_bitrate %s at time %s", 
                              encoded_frame.timestamp, frame_resolution, target_bitrate, datetime.datetime.now())

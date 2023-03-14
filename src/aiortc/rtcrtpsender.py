@@ -347,9 +347,6 @@ class RTCRtpSender:
                 bitrate, ssrcs = unpack_remb_fci(packet.fci)
                 if self._ssrc in ssrcs:
                     if BITRATE_ESTIMATION == 'gcc':
-                        self.__log_debug(
-                            "- receiver estimated maximum bitrate %d bps at time %s", bitrate, datetime.datetime.now()
-                        )
                         self.__gcc_target_bitrate = bitrate
             except ValueError:
                 pass
@@ -388,26 +385,26 @@ class RTCRtpSender:
         # harcode the bitrate
         self.__frame_count += 1
 
-        # bitrate of for paper
-        # hardcoded_bitrate = min(max(750000 - 110 * self.__frame_count, 20000) + max(0, -942500 + 110* self.__frame_count), 650000)
-
-        # 1 mbps to 20 kbps range
-        hardcoded_bitrate = min(max(1200000 - 55 * 3 * self.__frame_count, 20000) + max(0, -1175000 + 55 * 3 * self.__frame_count), 1000000)
-
         if BITRATE_ESTIMATION == 'perfect':
+            # bitrate of for paper
+            hardcoded_bitrate = min(max(750000 - 110 * self.__frame_count, 20000) + max(0, -942500 + 110* self.__frame_count), 650000)
+            # TODO for Vibha: bitrate for 1Mbps that goes down to 20kbps
+            # hardcoded_bitrate = min(max(1200000 - 55 * 3 * self.__frame_count, 20000) + max(0, -1175000 + 55 * 3 * self.__frame_count), 1000000)
             target_bitrate = hardcoded_bitrate
-            self.__log_debug(
-                     "- receiver estimated maximum bitrate %d bps at time %s", hardcoded_bitrate,
-                     datetime.datetime.now())
         else:
-            target_bitrate = self.__gcc_target_bitrate
+            target_bitrate = 0.8 * self.__gcc_target_bitrate
+
+        self.__log_debug(
+                    "- receiver estimated maximum bitrate %d bps at time %s", self.__gcc_target_bitrate,
+                    datetime.datetime.now())
 
         lr_size = self.get_lr_size_by_bitrate(target_bitrate)
         self.__track._lr_size = lr_size
 
         # check network status before encoding
         # resize the frame down if the network condition is worse
-        if lr_size != frame.width and self.__kind == "lr_video":
+        #TODO: check if I should resize for 1024 as well
+        if self.__kind == "lr_video":
             frame_array = frame.to_rgb().to_ndarray()
             frame_tensor = frame_to_tensor(img_as_float32(frame_array), self.device)
             lr_frame_array = resize_tensor_to_array(frame_tensor, lr_size , self.device)
@@ -426,18 +423,15 @@ class RTCRtpSender:
                 self.__lr_encoders[lr_size] = get_encoder(codec)
 
             self.__encoder = self.__lr_encoders[lr_size]
-            if lr_size == 1024:
-                enable_gcc = True
-                bitrate_code = BITRATE_PAYLOAD_DICT[600000]
-                quantizer = -1 #TODO
-            else:
-                enable_gcc = True
-                bitrate_code = BITRATE_PAYLOAD_DICT[self.get_model_bitrate_by_lr_size(lr_size, target_bitrate)]
-                quantizer = -1
+
+            enable_gcc = True
+            bitrate_code = BITRATE_PAYLOAD_DICT[self.get_model_bitrate_by_lr_size(lr_size, target_bitrate)]
+            quantizer = -1
 
         else: # "video", "audio", "keypoints"
-            lr_size = None
-            bitrate_code = None
+            # TODO: maybe change the None default
+            lr_size = 1024
+            bitrate_code = BITRATE_PAYLOAD_DICT[self.get_model_bitrate_by_lr_size(1024, target_bitrate)]
             if self.__encoder is None:
                 self.__encoder = get_encoder(codec)
             enable_gcc = True
@@ -448,13 +442,13 @@ class RTCRtpSender:
 
         force_keyframe = self.__force_keyframe
         self.__force_keyframe = False
-        self.__log_debug("encoding frame with force keyframe %s at time %s with quantizer %s \
-                target_bitrate %s enable_gcc %s, lr_size %s, bitrate_code %s",
+        self.__log_debug("encoding frame with force keyframe %s at time %s with quantizer %s"
+                " target_bitrate %s enable_gcc %s, lr_size %s, bitrate_code %s",
                 force_keyframe, datetime.datetime.now(), quantizer, target_bitrate,
                 enable_gcc, lr_size, bitrate_code)
         return await self.__loop.run_in_executor(
-            None, self.__encoder.encode, frame, force_keyframe, quantizer, target_bitrate, True
-        ), lr_size, bitrate_code
+            None, self.__encoder.encode, frame, force_keyframe, quantizer, target_bitrate, True,
+        lr_size, bitrate_code), lr_size, bitrate_code
 
 
     async def _retransmit(self, sequence_number: int) -> None:
@@ -505,6 +499,7 @@ class RTCRtpSender:
                                 counter, lr_size, sum([len(i) for i in payloads]), datetime.datetime.now(), bitrate_code)
                 old_timestamp = timestamp
                 timestamp = uint32_add(timestamp_origin, timestamp)
+
                 if self.__kind == "lr_video" and lr_size is not None and bitrate_code is not None:
                     """ Adding the resolution of frame (lr_size) as one byte
                         to the payload. resolution = 2 ** (int(resolution_payload))

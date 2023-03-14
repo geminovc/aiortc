@@ -13,6 +13,7 @@ from ._vpx import ffi, lib
 from .base import Decoder, Encoder
 
 import os
+import math
 
 DEFAULT_BITRATE = int(os.environ.get('VPX_DEFAULT_BITRATE', 500000))
 MIN_BITRATE = int(os.environ.get('VPX_MIN_BITRATE', 50000))
@@ -272,7 +273,8 @@ class Vp8Encoder(Encoder):
             lib.vpx_codec_destroy(self.codec)
 
     def encode(
-            self, frame: Frame, force_keyframe: bool = False, quantizer: int = 32, target_bitrate: int = 100000, enable_gcc: bool = False) -> Tuple[List[bytes], int]:
+            self, frame: Frame, force_keyframe: bool = False, quantizer: int = 32, target_bitrate: int = 100000,
+            enable_gcc: bool = False, lr_size: int=1024, bitrate_code: int=6) -> Tuple[List[bytes], int]:
         assert isinstance(frame, VideoFrame)
         if frame.format.name != "yuv420p":
             frame = frame.reformat(format="yuv420p")
@@ -396,6 +398,30 @@ class Vp8Encoder(Encoder):
                     pkt.data.frame.buf, pkt.data.frame.sz
                 )
                 length += pkt.data.frame.sz
+
+        # Add the resolution and the bitrate information
+        """ Adding the resolution of frame (lr_size) as one byte
+            to the payload. resolution = 2 ** (int(resolution_payload))
+            Adding bitrate_code as one byte to the payload
+        """
+        if lr_size is None:
+            lr_size = 1024
+        if bitrate_code is None:
+            bitrate_code = 6
+        resolution_bytes = bytes([int(math.log(lr_size,2))])
+        bitrate_bytes = bytes([int(bitrate_code)])
+        # resize buffer if needed
+        if length + len(resolution_bytes) + len(bitrate_bytes) > len(self.buffer):
+            new_buffer = bytearray(length + len(resolution_bytes) + len(bitrate_bytes))
+            new_buffer[0:length] = self.buffer[0:length]
+            self.buffer = new_buffer
+
+        # append new data
+        self.buffer[length : length + len(resolution_bytes)] = resolution_bytes
+        length += len(resolution_bytes)
+
+        self.buffer[length : length + len(bitrate_bytes)] = bitrate_bytes
+        length += len(resolution_bytes)
 
         # packetize
         payloads = []

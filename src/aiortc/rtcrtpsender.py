@@ -167,7 +167,7 @@ class RTCRtpSender:
         self.__force_keyframe = False
         self.__quantizer = quantizer
         self.__target_bitrate = target_bitrate
-        self.__gcc_target_bitrate = 500000
+        self.__gcc_target_bitrate = 650000
         self.__enable_gcc = enable_gcc
         self.__loop = asyncio.get_event_loop()
         self.__mid: Optional[str] = None
@@ -182,6 +182,7 @@ class RTCRtpSender:
         self.__started = False
         self.__stats = RTCStatsReport()
         self.__transport = transport
+        self.__prev_lr_size = None
 
         # stats
         self.__lsr: Optional[int] = None
@@ -358,9 +359,9 @@ class RTCRtpSender:
                                             (110000, 550000): 512,
                                             (550000, 3000000): 1024}
         for low, high in self.gcc_bitrate_resolution_dict.keys():
-            if low <= bitrate < high:
+            if low < bitrate <= high:
                 return self.gcc_bitrate_resolution_dict[(low, high)]
-        return 1024
+        return 512
 
 
     def get_model_bitrate_by_lr_size(self, lr_size, gcc_bitrate):
@@ -392,13 +393,19 @@ class RTCRtpSender:
             # hardcoded_bitrate = min(max(1200000 - 55 * 3 * self.__frame_count, 20000) + max(0, -1175000 + 55 * 3 * self.__frame_count), 1000000)
             target_bitrate = hardcoded_bitrate
         else:
-            target_bitrate = 0.8 * self.__gcc_target_bitrate
+            target_bitrate = self.__gcc_target_bitrate
 
         self.__log_debug(
-                    "- receiver estimated maximum bitrate %d bps at time %s", self.__gcc_target_bitrate,
+                    "- receiver estimated maximum bitrate %d bps at time %s", target_bitrate,
                     datetime.datetime.now())
 
         lr_size = self.get_lr_size_by_bitrate(target_bitrate)
+        if self.__prev_lr_size is None:
+            self.__prev_lr_size = lr_size
+        else:
+            if lr_size > self.__prev_lr_size:
+                lr_size = self.__prev_lr_size
+        self.__prev_lr_size = lr_size
         self.__track._lr_size = lr_size
 
         # check network status before encoding

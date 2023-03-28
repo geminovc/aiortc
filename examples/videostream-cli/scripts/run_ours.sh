@@ -56,7 +56,7 @@ do
 		--window $window
 
 	python3 get_metrics_timeseries.py \
-        	    --template-output ${experiment_dir}/${record_name}/plots_${end_point}/compression_timeseries_${end_point}_w${window}_ms.csv \
+        	    --template-output ${experiment_dir}/${record_name}/plots_${end_point}/timeseries_${end_point}_w${window}_ms.csv \
                     --save-dir ${experiment_dir}/${record_name}/plots_${end_point} \
        		    --video-path-1 ${video_name} \
                     --video-path-2 ${experiment_dir}/${record_name}/received.mp4 \

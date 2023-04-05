@@ -10,6 +10,7 @@ import numpy as np
 import concurrent.futures
 import os
 import datetime
+from skimage.metrics import structural_similarity as compare_ssim
 
 import av
 from av import AudioFrame, VideoFrame
@@ -25,6 +26,8 @@ from skimage import img_as_float32
 import torch
 import torch.nn.functional as F
 import yaml 
+
+reference_selection_at_sender = "same_tgt_ref_quality" #"prediction_quality"
 
 config_path = os.environ.get('CONFIG_PATH', 'None')
 checkpoint = os.environ.get('CHECKPOINT_PATH', 'None')
@@ -205,18 +208,63 @@ def place_frame_in_video_queue(frame, frame_index, loop, video_track, container)
 
 
 def requires_updated_reference(keypoints, frame_index, original_frame, lr_frame_array=None,
-        method="fixed_interval", reference_update_freq=30):
+        method="fixed_interval", reference_update_freq=1800):
     """ detect if the system needs an updated reference using one of multiple methods 
     """
-    source_frame_index = keypoints['source_index']
+    update_reference = False
 
     if frame_index == 0:
-        return True
+        update_reference = True
 
-    if method == "fixed_interval":
+    elif method == "fixed_interval":
         if frame_index % reference_update_freq == 0:
-            return True
-    return False
+            update_reference = True
+
+    elif method == "prediction_quality" or method == "same_tgt_ref_quality":
+        if keypoints is None:
+            keypoints, source_frame_index = model.extract_keypoints(original_frame)
+            keypoints['source_index'] = source_frame_index
+
+        logger.warning("Calling predict at sender for frame %s using source %s",
+                        frame_index, source_frame_index)
+
+        before_predict_time = time.perf_counter()
+        predicted_target = model.predict(keypoints, lr_frame_array)
+        after_predict_time = time.perf_counter()
+        logger.warning("Prediction time before sending frame %s: %s at time %s using source %s",
+                       frame_index, str(after_predict_time - before_predict_time),
+                       after_predict_time, source_frame_index)
+
+        prediction_ssim = compare_ssim(original_frame, predicted_target, multichannel=True)
+
+        if method == "prediction_quality":
+            if prediction_ssim < 0.85:
+                print(frame_index, prediction_ssim, original_frame.shape, predicted_target.shape)
+
+            update_reference = prediction_ssim < 0.85
+        else:
+            """ predict the target using the same frame (source=frame)"""
+
+            same_tgt_ref_predicted = model.predict_with_lr_video_and_source(lr_frame_array,
+                                         original_frame, keypoints)
+            same_tgt_ref_ssim = compare_ssim(original_frame, same_tgt_ref_predicted, multichannel=True)
+            update_reference = prediction_ssim < 0.9 * same_tgt_ref_ssim
+
+    if update_reference:
+        print(update_reference, frame_index)
+        if keypoints is None:
+            keypoints, source_frame_index = model.extract_keypoints(original_frame)
+            keypoints['source_index'] = source_frame_index
+
+        time_before_update = time.perf_counter()
+        model.update_source(frame_index, original_frame, keypoints)
+        time_after_update = time.perf_counter()
+        logger.warning(
+            "Time to update source frame with index %s in sender: %s",
+            str(frame_index), str(time_after_update - time_before_update)
+        )
+
+    return update_reference
 
 
 def player_worker(
@@ -232,7 +280,7 @@ def player_worker(
     audio_resampler = av.AudioResampler(
         format=audio_format_name, layout=audio_layout_name, rate=audio_sample_rate
     )
-
+    #TODO: update the reference in the model if need be, and send the video frame if it's detected as reference
     video_first_pts = None
 
     frame_time = None
@@ -328,6 +376,9 @@ def player_worker(
                         frame_array)
 
             if enable_prediction:
+                keypoints = None
+                lr_frame_array = None
+
                 logger.warning(
                     "MediaPlayer(%s) Put frame %s in keypoints queue: %s",
                      container.name, str(frame.index), str(frame)
@@ -352,8 +403,36 @@ def player_worker(
                                 lr_frame_array)
 
                 else:
-                    asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((frame_array, frame.time, \
-                            frame.index, frame.pts)), loop)
+                    #prediction_type == "keypoints"
+                    try:
+                        time_before_keypoints = time.perf_counter()
+                        keypoints, source_frame_index = model.extract_keypoints(frame_array)
+                        time_after_keypoints = time.perf_counter()
+                        logger.warning(
+                            "Keypoints extraction time for frame index %s in sender: %s",
+                            str(frame.index), str(time_after_keypoints - time_before_keypoints)
+                        )
+                        keypoints_frame = KeypointsFrame(keypoints, frame.pts, frame.index, source_frame_index)
+                    except:
+                        keypoints = None
+                        keypoints_frame = None
+                        logger.warning(
+                            "MediaPlayer(%s) Could not extract the keypoints for frame index %s", str(frame.index)
+                        )
+
+                    if keypoints_frame is not None:
+                         asyncio.run_coroutine_threadsafe(keypoints_track._queue.put((keypoints_frame, frame.time, \
+                                frame.index, frame.pts)), loop)
+
+                # check to see if the frame should be sent as a reference frame
+                # the function also updates the reference if the response is yes
+                if generator_type not in ['bicubic', 'swinir-lte']:
+                    update_reference = requires_updated_reference(keypoints, frame.index, frame_array,
+                                                        lr_frame_array, reference_selection_at_sender,
+                                                        reference_update_freq)
+                else:
+                    """no reference for these generators"""
+                    update_reference = False
 
             # Only add video frame is this is meant to be used as a source \
             # frame or if prediction is disabled
@@ -405,41 +484,8 @@ class PlayerStreamTrack(MediaStreamTrack):
             elif self.kind == "video":
                 self._player._send_times_file.write(f'Sent {frame_index} at {datetime.datetime.now()}\n')
             self._player._send_times_file.flush()
-        
-        # extract keypoints before sending
-        if self.kind == "keypoints": 
-            try:
-                frame_array = frame 
-                time_before_keypoints = time.perf_counter()
-                loop = asyncio.get_running_loop()
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    keypoints, source_frame_index = await loop.run_in_executor(pool,
-                                                            model.extract_keypoints, frame_array)
-                time_after_keypoints = time.perf_counter()
-                logger.warning(
-                    "Keypoints extraction time for frame index %s in sender: %s",
-                    str(frame_index), str(time_after_keypoints - time_before_keypoints)
-                )
-                keypoints_frame = KeypointsFrame(keypoints, frame_pts, frame_index, source_frame_index) 
-                
-                if frame_index % self._player._reference_update_freq == 0:
-                    time_before_update = time.perf_counter()
-                    model.update_source(frame_index, frame_array, keypoints)
-                    time_after_update = time.perf_counter()
-                    logger.warning(
-                        "Time to update source frame with index %s in sender: %s",
-                        str(frame_index), str(time_after_update - time_before_update)
-                    )
-            except:
-                keypoints_frame = None
-                logger.warning(
-                    "MediaPlayer(%s) Could not extract the keypoints for frame index %s", str(frame_index)
-                )
 
-            if keypoints_frame is not None:
-                return keypoints_frame
-        else:
-            return frame
+        return frame
 
     def stop(self):
         super().stop()
